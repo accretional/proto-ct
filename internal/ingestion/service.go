@@ -373,7 +373,7 @@ func processLeaf(
 	}
 
 	var cn, org, state, country, serial string
-	var sans []string
+	var sans, ips []string
 	var notBefore, notAfter string
 
 	if cert != nil {
@@ -389,11 +389,25 @@ func processLeaf(
 		}
 		serial = serialHex(cert.SerialNumber)
 		sans = cert.DNSNames
+		for _, ip := range cert.IPAddresses {
+			ips = append(ips, ip.String())
+		}
 		notBefore = cert.NotBefore.UTC().Format("2006-01-02T15:04:05Z")
 		notAfter = cert.NotAfter.UTC().Format("2006-01-02T15:04:05Z")
 	}
 
 	subjectURL := buildURL(sans, cn)
+	isWildcard := 0
+	for _, s := range sans {
+		if strings.HasPrefix(s, "*.") {
+			isWildcard = 1
+			break
+		}
+	}
+	entryType := "x509"
+	if leaf.EntryType == ctlog.EntryTypePrecert {
+		entryType = "precert"
+	}
 
 	var caID int64
 	var issuerCN, issuerOrg, issuerCountry string
@@ -414,7 +428,13 @@ func processLeaf(
 		NotBefore:    notBefore,
 		NotAfter:     notAfter,
 		SANDomains:   strings.Join(sans, ","),
+		SANIPS:       strings.Join(ips, ","),
 		URL:          subjectURL,
+		IsWildcard:   isWildcard,
+		SANCount:     len(sans),
+		EntryType:    entryType,
+		TileIdx:      tileIdx,
+		EntryIdx:     entryIdx,
 	}); err != nil {
 		return nil, db.CertLogEntry{}, fmt.Errorf("insert subject: %w", err)
 	}

@@ -18,16 +18,7 @@ type SubjectDB struct {
 	db *sql.DB
 }
 
-// Issuer holds CA certificate information.
-type Issuer struct {
-	CAID         int64
-	Fingerprint  string
-	CommonName   string
-	Organization string
-	Country      string
-}
-
-// Subject holds certificate subject information.
+// Subject holds certificate subject information extracted from a CT log entry.
 type Subject struct {
 	CAID         int64
 	SerialNumber string
@@ -37,8 +28,14 @@ type Subject struct {
 	Country      string
 	NotBefore    string
 	NotAfter     string
-	SANDomains   string // comma-separated
+	SANDomains   string // comma-separated DNS SANs
+	SANIPS        string // comma-separated IP SANs
 	URL          string
+	IsWildcard   int    // 1 if any SAN starts with "*."
+	SANCount     int
+	EntryType    string // "x509" | "precert"
+	TileIdx      int
+	EntryIdx     int
 }
 
 // OpenIssuerDB opens or creates the issuer database at path.
@@ -91,6 +88,7 @@ func (idb *IssuerDB) UpsertIssuer(fp [32]byte, commonName, organization, country
 func (idb *IssuerDB) Close() error { return idb.db.Close() }
 
 // OpenSubjectDB opens or creates the subject database at path.
+// Applies schema migrations so older databases gain new columns automatically.
 func OpenSubjectDB(path string) (*SubjectDB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -100,6 +98,8 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// Base table (created fresh or already exists).
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS subjects (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,26 +112,60 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 			not_before    TEXT,
 			not_after     TEXT,
 			san_domains   TEXT,
-			url           TEXT
+			san_ips       TEXT,
+			url           TEXT,
+			is_wildcard   INTEGER DEFAULT 0,
+			san_count     INTEGER DEFAULT 0,
+			entry_type    TEXT    DEFAULT 'x509',
+			tile_idx      INTEGER,
+			entry_idx     INTEGER
 		);
-		CREATE INDEX IF NOT EXISTS idx_subjects_ca_id ON subjects(ca_id);
-		CREATE INDEX IF NOT EXISTS idx_subjects_cn    ON subjects(common_name);
+		CREATE INDEX IF NOT EXISTS idx_subjects_ca_id    ON subjects(ca_id);
+		CREATE INDEX IF NOT EXISTS idx_subjects_cn       ON subjects(common_name);
+		CREATE INDEX IF NOT EXISTS idx_subjects_not_after ON subjects(not_after);
+		CREATE INDEX IF NOT EXISTS idx_subjects_wildcard  ON subjects(is_wildcard);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx);
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create subjects table: %w", err)
 	}
+
+	// Additive migrations for databases created before new columns existed.
+	// ALTER TABLE ADD COLUMN returns an error if the column already exists; we ignore it.
+	migrations := []string{
+		`ALTER TABLE subjects ADD COLUMN san_ips     TEXT`,
+		`ALTER TABLE subjects ADD COLUMN is_wildcard INTEGER DEFAULT 0`,
+		`ALTER TABLE subjects ADD COLUMN san_count   INTEGER DEFAULT 0`,
+		`ALTER TABLE subjects ADD COLUMN entry_type  TEXT DEFAULT 'x509'`,
+		`ALTER TABLE subjects ADD COLUMN tile_idx    INTEGER`,
+		`ALTER TABLE subjects ADD COLUMN entry_idx   INTEGER`,
+	}
+	for _, m := range migrations {
+		db.Exec(m) //nolint:errcheck — duplicate column errors are expected and safe to ignore
+	}
+	// Indexes may also be missing on older databases.
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_subjects_not_after  ON subjects(not_after)`,
+		`CREATE INDEX IF NOT EXISTS idx_subjects_wildcard   ON subjects(is_wildcard)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`,
+	} {
+		db.Exec(idx) //nolint:errcheck
+	}
+
 	return &SubjectDB{db: db}, nil
 }
 
-// InsertSubject records a certificate subject.
+// InsertSubject records a certificate subject. Silently ignores duplicate tile+entry.
 func (sdb *SubjectDB) InsertSubject(s Subject) error {
 	_, err := sdb.db.Exec(`
-		INSERT INTO subjects
+		INSERT OR IGNORE INTO subjects
 			(ca_id, serial_number, common_name, organization, state, country,
-			 not_before, not_after, san_domains, url)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 not_before, not_after, san_domains, san_ips, url,
+			 is_wildcard, san_count, entry_type, tile_idx, entry_idx)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.CAID, s.SerialNumber, s.CommonName, s.Organization, s.State, s.Country,
-		s.NotBefore, s.NotAfter, s.SANDomains, s.URL,
+		s.NotBefore, s.NotAfter, s.SANDomains, s.SANIPS, s.URL,
+		s.IsWildcard, s.SANCount, s.EntryType, s.TileIdx, s.EntryIdx,
 	)
 	if err != nil {
 		return fmt.Errorf("insert subject: %w", err)
