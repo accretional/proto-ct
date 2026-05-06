@@ -3,6 +3,7 @@ package ctlog
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -169,15 +170,15 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("HTTP %d for %s", e.code, e.url)
 }
 
+// IsNotFound reports whether err was caused by an HTTP 404 response.
+func IsNotFound(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.code == http.StatusNotFound
+}
+
 func isFatalHTTP(err error) bool {
 	var he *httpError
-	if ok := (err); ok != nil {
-		if e, ok := err.(*httpError); ok {
-			return e.code >= 400 && e.code < 500
-		}
-	}
-	_ = he
-	return false
+	return errors.As(err, &he) && he.code >= 400 && he.code < 500
 }
 
 // tileIndexPath encodes a tile index as a path per the static-ct-api spec.

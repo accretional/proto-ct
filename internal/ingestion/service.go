@@ -95,8 +95,8 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 	if req.MonitoringApiRoot == "" {
 		return status.Error(codes.InvalidArgument, "monitoring_api_root is required")
 	}
-	if req.BatchSize <= 0 {
-		return status.Error(codes.InvalidArgument, "batch_size must be positive")
+	if req.BatchSize < 0 {
+		return status.Error(codes.InvalidArgument, "batch_size must be non-negative (0 = continuous)")
 	}
 
 	outputDir := req.OutputDir
@@ -156,9 +156,10 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 		return status.Errorf(codes.Internal, "open dated dbs: %v", err)
 	}
 
+	continuous := req.BatchSize == 0
 	totalTarget := int(req.BatchSize)
 
-	for sessionProcessed < totalTarget {
+	for continuous || sessionProcessed < totalTarget {
 		if err := ctx.Err(); err != nil {
 			issuerDB.Close()
 			subjectDB.Close()
@@ -179,16 +180,22 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 			clear(issuerCache) // ca_ids restart in the new issuerDB
 		}
 
-		remaining := totalTarget - sessionProcessed
-		maxFromTile := min(remaining, 256)
+		maxFromTile := 256
+		if !continuous {
+			maxFromTile = min(totalTarget-sessionProcessed, 256)
+		}
 
-		log.Printf("tile %d  session %d/%d  total %d",
-			tileIdx, sessionProcessed, totalTarget, globalProcessed)
+		log.Printf("tile %d  session %d  total %d",
+			tileIdx, sessionProcessed, globalProcessed)
 
 		leaves, err := client.FetchTile(ctx, tileIdx, maxFromTile)
 		if err != nil {
 			issuerDB.Close()
 			subjectDB.Close()
+			if continuous && ctlog.IsNotFound(err) {
+				log.Printf("caught up at tile %d (total mirrored: %d)", tileIdx, globalProcessed)
+				return nil
+			}
 			return status.Errorf(codes.Internal, "fetch tile %d: %v", tileIdx, err)
 		}
 		if len(leaves) == 0 {
@@ -201,19 +208,17 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 		}
 
 		tileURL := client.TileURL(tileIdx)
-		var certLogs []db.CertLogEntry
 
 		for entryIdx, leaf := range leaves {
-			if sessionProcessed >= totalTarget {
+			if !continuous && sessionProcessed >= totalTarget {
 				break
 			}
 			ctLogURI := fmt.Sprintf("%s#entry=%d", tileURL, entryIdx)
 
-			rec, certLog, err := processLeaf(leaf, tileIdx, entryIdx, ctLogURI, subjectDB, issuerCache)
+			rec, err := processLeaf(leaf, tileIdx, entryIdx, ctLogURI, subjectDB, issuerCache)
 			if err != nil {
 				log.Printf("tile=%d entry=%d skip: %v", tileIdx, entryIdx, err)
 			} else {
-				certLogs = append(certLogs, certLog)
 				if err := stream.Send(rec); err != nil {
 					issuerDB.Close()
 					subjectDB.Close()
@@ -224,11 +229,6 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 			globalProcessed++
 		}
 
-		if len(certLogs) > 0 {
-			if err := progressDB.LogCerts(run.ID, certLogs); err != nil {
-				log.Printf("warn: log certs tile %d: %v", tileIdx, err)
-			}
-		}
 		if err := progressDB.UpdateProgress(run.ID, tileIdx+1, globalProcessed); err != nil {
 			log.Printf("warn: update progress tile %d: %v", tileIdx, err)
 		}
@@ -361,10 +361,10 @@ func processLeaf(
 	ctLogURI string,
 	subjectDB *db.SubjectDB,
 	issuerCache map[[32]byte]*issuerInfo,
-) (*pb.SubjectRecord, db.CertLogEntry, error) {
+) (*pb.SubjectRecord, error) {
 	cert, err := parseCert(leaf)
 	if err != nil {
-		return nil, db.CertLogEntry{}, fmt.Errorf("parse cert: %w", err)
+		return nil, fmt.Errorf("parse cert: %w", err)
 	}
 
 	var info *issuerInfo
@@ -436,7 +436,7 @@ func processLeaf(
 		TileIdx:      tileIdx,
 		EntryIdx:     entryIdx,
 	}); err != nil {
-		return nil, db.CertLogEntry{}, fmt.Errorf("insert subject: %w", err)
+		return nil, fmt.Errorf("insert subject: %w", err)
 	}
 
 	return &pb.SubjectRecord{
@@ -454,11 +454,6 @@ func processLeaf(
 		IssuerCountry:      issuerCountry,
 		SerialNumber:       serial,
 		CtLogUri:           ctLogURI,
-	}, db.CertLogEntry{
-		TileIdx:  tileIdx,
-		EntryIdx: entryIdx,
-		NotAfter: notAfter,
-		CTLogURI: ctLogURI,
 	}, nil
 }
 

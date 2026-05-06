@@ -17,10 +17,11 @@ import (
 var (
 	serverAddr     = flag.String("addr", "localhost:50051", "server address")
 	monitoringRoot = flag.String("root", "https://mon.sycamore.ct.letsencrypt.org/2026h1/tile/data/", "monitoring API root (tile/data/ endpoint)")
-	batchSize      = flag.Int64("batch", 1000, "entries to mirror this session")
+	batchSize      = flag.Int64("batch", 1000, "entries to mirror this session (ignored when --continuous is set)")
 	outputDir      = flag.String("out", "/Volumes/wd_office_2/datasets/CT/", "base output directory (DBs go in YYYYMMDD subdir)")
 	targetQPS      = flag.Float64("qps", 500, "target QPS to monitoring endpoint (actual = 80%); 0 = unlimited")
 	checkMode      = flag.Bool("check", false, "run a one-shot metrics check instead of ingesting")
+	continuous     = flag.Bool("continuous", false, "mirror until fully caught up with the live log (no batch limit)")
 )
 
 func main() {
@@ -68,14 +69,23 @@ func runCheck(ctx context.Context, client pb.CTIngestionServiceClient) {
 }
 
 func runIngest(ctx context.Context, client pb.CTIngestionServiceClient) {
+	batch := *batchSize
+	if *continuous {
+		batch = 0
+	}
 	req := &pb.IngestRequest{
 		MonitoringApiRoot: *monitoringRoot,
-		BatchSize:         *batchSize,
+		BatchSize:         batch,
 		OutputDir:         *outputDir,
 		TargetQps:         *targetQPS,
 	}
-	log.Printf("starting mirror: batch=%d qps=%.0f root=%s out=%s",
-		*batchSize, *targetQPS, *monitoringRoot, *outputDir)
+	if *continuous {
+		log.Printf("starting continuous mirror: qps=%.0f root=%s out=%s",
+			*targetQPS, *monitoringRoot, *outputDir)
+	} else {
+		log.Printf("starting mirror: batch=%d qps=%.0f root=%s out=%s",
+			batch, *targetQPS, *monitoringRoot, *outputDir)
+	}
 
 	stream, err := client.IngestLog(ctx, req)
 	if err != nil {

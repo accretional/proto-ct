@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ProgressDB tracks ingestion runs and per-cert metadata.
+// ProgressDB tracks ingestion runs.
 type ProgressDB struct {
 	db *sql.DB
 }
@@ -44,20 +44,19 @@ func OpenProgressDB(path string) (*ProgressDB, error) {
 			next_tile_idx   INTEGER NOT NULL DEFAULT 0,
 			total_processed INTEGER NOT NULL DEFAULT 0
 		);
-		CREATE TABLE IF NOT EXISTS cert_log (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			run_id      INTEGER NOT NULL,
-			tile_idx    INTEGER NOT NULL,
-			entry_idx   INTEGER NOT NULL,
-			not_after   TEXT,
-			ct_log_uri  TEXT,
-			FOREIGN KEY(run_id) REFERENCES runs(id)
-		);
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_cert_log_tile_entry
-			ON cert_log(tile_idx, entry_idx);
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create progress tables: %w", err)
+	}
+	// Drop the legacy cert_log table (redundant — subjects.db enforces idempotency).
+	// VACUUM reclaims the freed pages on first open after upgrade.
+	if _, err := db.Exec(`DROP TABLE IF EXISTS cert_log;`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("drop cert_log: %w", err)
+	}
+	if _, err := db.Exec(`VACUUM;`); err != nil {
+		// Non-fatal: space will be reclaimed incrementally.
+		fmt.Printf("warn: vacuum progress.db: %v\n", err)
 	}
 	return &ProgressDB{db: db}, nil
 }
@@ -105,36 +104,6 @@ func (p *ProgressDB) UpdateProgress(runID int64, nextTileIdx, totalProcessed int
 		return fmt.Errorf("update progress: %w", err)
 	}
 	return nil
-}
-
-// LogCerts records metadata for a batch of processed entries. Ignores duplicates.
-func (p *ProgressDB) LogCerts(runID int64, entries []CertLogEntry) error {
-	tx, err := p.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-	stmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO cert_log (run_id, tile_idx, entry_idx, not_after, ct_log_uri)
-		VALUES (?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, e := range entries {
-		if _, err := stmt.Exec(runID, e.TileIdx, e.EntryIdx, e.NotAfter, e.CTLogURI); err != nil {
-			return fmt.Errorf("log cert %d/%d: %w", e.TileIdx, e.EntryIdx, err)
-		}
-	}
-	return tx.Commit()
-}
-
-// CertLogEntry holds per-cert metadata for the progress log.
-type CertLogEntry struct {
-	TileIdx  int
-	EntryIdx int
-	NotAfter string
-	CTLogURI string
 }
 
 // GetTotalProcessed returns the cumulative entries mirrored for a monitoring root.
