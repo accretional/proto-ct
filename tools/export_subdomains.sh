@@ -25,18 +25,16 @@ COUNT_OUT="${OUT_DIR}/subdomains_with_count.tsv"
 
 echo "Scanning subjects.db files under $BASE_DIR ..." >&2
 
-# Collect all subjects.db files
-mapfile -t DBS < <(find "$BASE_DIR" -name "subjects.db" | sort)
-if [ ${#DBS[@]} -eq 0 ]; then
+DB_COUNT=$(find "$BASE_DIR" -name "subjects.db" | wc -l | tr -d ' ')
+if [ "$DB_COUNT" -eq 0 ]; then
   echo "No subjects.db files found." >&2
   exit 1
 fi
-
-echo "Found ${#DBS[@]} database(s)" >&2
+echo "Found $DB_COUNT database(s)" >&2
 
 # Stream san_domains from every DB, split on commas, normalise, count.
 {
-  for db in "${DBS[@]}"; do
+  find "$BASE_DIR" -name "subjects.db" | sort | while read -r db; do
     sqlite3 "$db" "SELECT san_domains FROM subjects WHERE san_domains != '' AND san_domains IS NOT NULL;"
   done
 } \

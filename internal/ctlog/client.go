@@ -12,6 +12,11 @@ import (
 	"golang.org/x/time/rate"
 )
 
+const (
+	maxRetries    = 5
+	retryBaseWait = 2 * time.Second
+)
+
 // Client fetches tiles from a static-ct-api log.
 type Client struct {
 	httpClient   *http.Client
@@ -92,6 +97,39 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 		}
 	}
 
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := retryBaseWait * (1 << (attempt - 1)) // 2s, 4s, 8s, 16s, 32s
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+
+		data, err := c.doGet(ctx, url)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+
+		// Don't retry on context cancellation or definitive HTTP errors.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Don't retry 4xx — those are permanent failures.
+		if isFatalHTTP(err) {
+			return nil, err
+		}
+		if attempt < maxRetries {
+			fmt.Printf("warn: GET %s attempt %d/%d: %v — retrying\n", url, attempt+1, maxRetries, err)
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", maxRetries+1, lastErr)
+}
+
+func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -106,7 +144,7 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
+		return nil, &httpError{code: resp.StatusCode, url: url}
 	}
 
 	var reader io.Reader = resp.Body
@@ -120,6 +158,26 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	}
 
 	return io.ReadAll(reader)
+}
+
+type httpError struct {
+	code int
+	url  string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("HTTP %d for %s", e.code, e.url)
+}
+
+func isFatalHTTP(err error) bool {
+	var he *httpError
+	if ok := (err); ok != nil {
+		if e, ok := err.(*httpError); ok {
+			return e.code >= 400 && e.code < 500
+		}
+	}
+	_ = he
+	return false
 }
 
 // tileIndexPath encodes a tile index as a path per the static-ct-api spec.
