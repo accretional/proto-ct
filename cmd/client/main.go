@@ -33,13 +33,16 @@ func main() {
 	defer conn.Close()
 
 	client := pb.NewCTIngestionServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 
 	if *checkMode {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		runCheck(ctx, client)
 		return
 	}
+	// Ingest mode: no deadline — jobs can run for many hours.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runIngest(ctx, client)
 }
 
