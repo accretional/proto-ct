@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package ctingestion.v1;
+
+option go_package = "github.com/benfultz/proto-ct/gen/ctingestion/v1";
+
+service CTIngestionService {
+  // IngestLog downloads CT log tiles, writes to SQLite, and streams parsed subjects.
+  rpc IngestLog(IngestRequest) returns (stream SubjectRecord);
+  // Check returns current ingestion metrics (tree size, coverage, DB sizes).
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+// IngestRequest specifies a CT log mirroring job.
+message IngestRequest {
+  // Base URL of the tile/data endpoint.
+  // e.g. "https://mon.sycamore.ct.letsencrypt.org/2026h1/tile/data/"
+  string monitoring_api_root = 1;
+  // Number of log entries to mirror this session.
+  int64 batch_size = 2;
+  // Base output directory. Databases are placed in a YYYYMMDD subdirectory
+  // (rotating at local midnight). progress.db sits at the root.
+  string output_dir = 3;
+  // Target maximum QPS to the monitoring endpoint. Actual rate is ~80% of this.
+  // 0 = unlimited.
+  double target_qps = 4;
+}
+
+// SubjectRecord is streamed back for each mirrored certificate subject.
+message SubjectRecord {
+  string url                 = 1;
+  string common_name         = 2;
+  string organization        = 3;
+  string state               = 4;
+  string country             = 5;
+  int64  ca_id               = 6;
+  repeated string san_domains = 7;
+  string not_before          = 8;
+  string not_after           = 9;
+  string issuer_common_name  = 10;
+  string issuer_organization = 11;
+  string issuer_country      = 12;
+  string serial_number       = 13;
+  string ct_log_uri          = 14;
+}
+
+// CheckRequest selects which mirror to inspect.
+// If fields are empty the server uses values from the most recent IngestLog call.
+message CheckRequest {
+  string output_dir          = 1;
+  string monitoring_api_root = 2;
+}
+
+// CheckResponse carries current mirroring progress and storage metrics.
+message CheckResponse {
+  int64  tree_size        = 1;  // total entries in the live CT log
+  int64  total_processed  = 2;  // entries mirrored so far
+  double coverage_pct     = 3;  // total_processed / tree_size * 100
+  int64  db_bytes_total   = 4;  // combined size of all local SQLite files
+  string updated_at       = 5;  // RFC3339 timestamp of this snapshot
+  repeated DbInfo db_files = 6; // per-file breakdown
+}
+
+// DbInfo describes a single SQLite file on disk.
+message DbInfo {
+  string path        = 1;
+  int64  size_bytes  = 2;
+}
