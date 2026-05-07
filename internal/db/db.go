@@ -44,7 +44,12 @@ func OpenIssuerDB(path string) (*IssuerDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open issuer db: %w", err)
 	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=WAL;
+		PRAGMA synchronous=NORMAL;
+		PRAGMA cache_size=-32768;
+		PRAGMA temp_store=MEMORY;
+	`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -94,7 +99,13 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open subject db: %w", err)
 	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=WAL;
+		PRAGMA synchronous=NORMAL;
+		PRAGMA cache_size=-65536;
+		PRAGMA wal_autocheckpoint=10000;
+		PRAGMA temp_store=MEMORY;
+	`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -157,20 +168,40 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 
 // InsertSubject records a certificate subject. Silently ignores duplicate tile+entry.
 func (sdb *SubjectDB) InsertSubject(s Subject) error {
-	_, err := sdb.db.Exec(`
+	return sdb.InsertSubjectBatch([]Subject{s})
+}
+
+// InsertSubjectBatch records a batch of subjects in a single transaction.
+// Silently ignores duplicates on (tile_idx, entry_idx).
+func (sdb *SubjectDB) InsertSubjectBatch(subjects []Subject) error {
+	if len(subjects) == 0 {
+		return nil
+	}
+	tx, err := sdb.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin batch: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.Prepare(`
 		INSERT OR IGNORE INTO subjects
 			(ca_id, serial_number, common_name, organization, state, country,
 			 not_before, not_after, san_domains, san_ips, url,
 			 is_wildcard, san_count, entry_type, tile_idx, entry_idx)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		s.CAID, s.SerialNumber, s.CommonName, s.Organization, s.State, s.Country,
-		s.NotBefore, s.NotAfter, s.SANDomains, s.SANIPS, s.URL,
-		s.IsWildcard, s.SANCount, s.EntryType, s.TileIdx, s.EntryIdx,
-	)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
-		return fmt.Errorf("insert subject: %w", err)
+		return fmt.Errorf("prepare insert: %w", err)
 	}
-	return nil
+	defer stmt.Close()
+	for _, s := range subjects {
+		if _, err := stmt.Exec(
+			s.CAID, s.SerialNumber, s.CommonName, s.Organization, s.State, s.Country,
+			s.NotBefore, s.NotAfter, s.SANDomains, s.SANIPS, s.URL,
+			s.IsWildcard, s.SANCount, s.EntryType, s.TileIdx, s.EntryIdx,
+		); err != nil {
+			return fmt.Errorf("insert subject tile=%d entry=%d: %w", s.TileIdx, s.EntryIdx, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Close closes the database.

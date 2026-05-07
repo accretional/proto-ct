@@ -209,24 +209,36 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 
 		tileURL := client.TileURL(tileIdx)
 
+		var batch []db.Subject
+		var recs []*pb.SubjectRecord
 		for entryIdx, leaf := range leaves {
 			if !continuous && sessionProcessed >= totalTarget {
 				break
 			}
 			ctLogURI := fmt.Sprintf("%s#entry=%d", tileURL, entryIdx)
 
-			rec, err := processLeaf(leaf, tileIdx, entryIdx, ctLogURI, subjectDB, issuerCache)
+			rec, subject, err := processLeaf(leaf, tileIdx, entryIdx, ctLogURI, issuerCache)
 			if err != nil {
 				log.Printf("tile=%d entry=%d skip: %v", tileIdx, entryIdx, err)
 			} else {
+				batch = append(batch, subject)
+				recs = append(recs, rec)
+			}
+			sessionProcessed++
+			globalProcessed++
+		}
+
+		if len(batch) > 0 {
+			if err := subjectDB.InsertSubjectBatch(batch); err != nil {
+				log.Printf("warn: insert batch tile %d: %v", tileIdx, err)
+			}
+			for _, rec := range recs {
 				if err := stream.Send(rec); err != nil {
 					issuerDB.Close()
 					subjectDB.Close()
 					return err
 				}
 			}
-			sessionProcessed++
-			globalProcessed++
 		}
 
 		if err := progressDB.UpdateProgress(run.ID, tileIdx+1, globalProcessed); err != nil {
@@ -359,12 +371,11 @@ func processLeaf(
 	leaf *ctlog.TileLeaf,
 	tileIdx, entryIdx int,
 	ctLogURI string,
-	subjectDB *db.SubjectDB,
 	issuerCache map[[32]byte]*issuerInfo,
-) (*pb.SubjectRecord, error) {
+) (*pb.SubjectRecord, db.Subject, error) {
 	cert, err := parseCert(leaf)
 	if err != nil {
-		return nil, fmt.Errorf("parse cert: %w", err)
+		return nil, db.Subject{}, fmt.Errorf("parse cert: %w", err)
 	}
 
 	var info *issuerInfo
@@ -418,7 +429,7 @@ func processLeaf(
 		issuerCountry = info.country
 	}
 
-	if err := subjectDB.InsertSubject(db.Subject{
+	subject := db.Subject{
 		CAID:         caID,
 		SerialNumber: serial,
 		CommonName:   cn,
@@ -435,11 +446,9 @@ func processLeaf(
 		EntryType:    entryType,
 		TileIdx:      tileIdx,
 		EntryIdx:     entryIdx,
-	}); err != nil {
-		return nil, fmt.Errorf("insert subject: %w", err)
 	}
 
-	return &pb.SubjectRecord{
+	rec := &pb.SubjectRecord{
 		Url:                subjectURL,
 		CommonName:         cn,
 		Organization:       org,
@@ -454,7 +463,9 @@ func processLeaf(
 		IssuerCountry:      issuerCountry,
 		SerialNumber:       serial,
 		CtLogUri:           ctLogURI,
-	}, nil
+	}
+
+	return rec, subject, nil
 }
 
 // ── cert parsing helpers ──────────────────────────────────────────────────────
