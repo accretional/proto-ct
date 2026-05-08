@@ -48,15 +48,10 @@ func OpenProgressDB(path string) (*ProgressDB, error) {
 		db.Close()
 		return nil, fmt.Errorf("create progress tables: %w", err)
 	}
-	// Drop the legacy cert_log table (redundant — subjects.db enforces idempotency).
-	// VACUUM reclaims the freed pages on first open after upgrade.
+	// One-time migration: drop legacy cert_log if it still exists.
 	if _, err := db.Exec(`DROP TABLE IF EXISTS cert_log;`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("drop cert_log: %w", err)
-	}
-	if _, err := db.Exec(`VACUUM;`); err != nil {
-		// Non-fatal: space will be reclaimed incrementally.
-		fmt.Printf("warn: vacuum progress.db: %v\n", err)
 	}
 	return &ProgressDB{db: db}, nil
 }
