@@ -29,12 +29,15 @@ type IngestRequest struct {
 	MonitoringApiRoot string `protobuf:"bytes,1,opt,name=monitoring_api_root,json=monitoringApiRoot,proto3" json:"monitoring_api_root,omitempty"`
 	// Number of log entries to mirror this session.
 	BatchSize int64 `protobuf:"varint,2,opt,name=batch_size,json=batchSize,proto3" json:"batch_size,omitempty"`
-	// Base output directory. Databases are placed in a YYYYMMDD subdirectory
-	// (rotating at local midnight). progress.db sits at the root.
+	// Active staging directory (fast local storage). Dated YYYYMMDD subdirs are
+	// written here during ingestion and promoted to archive_dir on daily rollover.
 	OutputDir string `protobuf:"bytes,3,opt,name=output_dir,json=outputDir,proto3" json:"output_dir,omitempty"`
 	// Target maximum QPS to the monitoring endpoint. Actual rate is ~80% of this.
 	// 0 = unlimited.
-	TargetQps     float64 `protobuf:"fixed64,4,opt,name=target_qps,json=targetQps,proto3" json:"target_qps,omitempty"`
+	TargetQps float64 `protobuf:"fixed64,4,opt,name=target_qps,json=targetQps,proto3" json:"target_qps,omitempty"`
+	// Persistent archive directory (durable storage). Receives completed dated dirs
+	// on rollover. progress.db always lives here.
+	ArchiveDir    string `protobuf:"bytes,5,opt,name=archive_dir,json=archiveDir,proto3" json:"archive_dir,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -95,6 +98,13 @@ func (x *IngestRequest) GetTargetQps() float64 {
 		return x.TargetQps
 	}
 	return 0
+}
+
+func (x *IngestRequest) GetArchiveDir() string {
+	if x != nil {
+		return x.ArchiveDir
+	}
+	return ""
 }
 
 // SubjectRecord is streamed back for each mirrored certificate subject.
@@ -250,8 +260,9 @@ func (x *SubjectRecord) GetCtLogUri() string {
 // If fields are empty the server uses values from the most recent IngestLog call.
 type CheckRequest struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	OutputDir         string                 `protobuf:"bytes,1,opt,name=output_dir,json=outputDir,proto3" json:"output_dir,omitempty"`
+	OutputDir         string                 `protobuf:"bytes,1,opt,name=output_dir,json=outputDir,proto3" json:"output_dir,omitempty"` // active staging dir
 	MonitoringApiRoot string                 `protobuf:"bytes,2,opt,name=monitoring_api_root,json=monitoringApiRoot,proto3" json:"monitoring_api_root,omitempty"`
+	ArchiveDir        string                 `protobuf:"bytes,3,opt,name=archive_dir,json=archiveDir,proto3" json:"archive_dir,omitempty"` // persistent archive dir (for progress.db + old dated dirs)
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -296,6 +307,13 @@ func (x *CheckRequest) GetOutputDir() string {
 func (x *CheckRequest) GetMonitoringApiRoot() string {
 	if x != nil {
 		return x.MonitoringApiRoot
+	}
+	return ""
+}
+
+func (x *CheckRequest) GetArchiveDir() string {
+	if x != nil {
+		return x.ArchiveDir
 	}
 	return ""
 }
@@ -442,7 +460,7 @@ var File_ctingestion_v1_ingestion_proto protoreflect.FileDescriptor
 
 const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\n" +
-	"\x1ectingestion/v1/ingestion.proto\x12\x0ectingestion.v1\"\x9c\x01\n" +
+	"\x1ectingestion/v1/ingestion.proto\x12\x0ectingestion.v1\"\xbd\x01\n" +
 	"\rIngestRequest\x12.\n" +
 	"\x13monitoring_api_root\x18\x01 \x01(\tR\x11monitoringApiRoot\x12\x1d\n" +
 	"\n" +
@@ -450,7 +468,9 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\n" +
 	"output_dir\x18\x03 \x01(\tR\toutputDir\x12\x1d\n" +
 	"\n" +
-	"target_qps\x18\x04 \x01(\x01R\ttargetQps\"\xd1\x03\n" +
+	"target_qps\x18\x04 \x01(\x01R\ttargetQps\x12\x1f\n" +
+	"\varchive_dir\x18\x05 \x01(\tR\n" +
+	"archiveDir\"\xd1\x03\n" +
 	"\rSubjectRecord\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x1f\n" +
 	"\vcommon_name\x18\x02 \x01(\tR\n" +
@@ -470,11 +490,13 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\x0eissuer_country\x18\f \x01(\tR\rissuerCountry\x12#\n" +
 	"\rserial_number\x18\r \x01(\tR\fserialNumber\x12\x1c\n" +
 	"\n" +
-	"ct_log_uri\x18\x0e \x01(\tR\bctLogUri\"]\n" +
+	"ct_log_uri\x18\x0e \x01(\tR\bctLogUri\"~\n" +
 	"\fCheckRequest\x12\x1d\n" +
 	"\n" +
 	"output_dir\x18\x01 \x01(\tR\toutputDir\x12.\n" +
-	"\x13monitoring_api_root\x18\x02 \x01(\tR\x11monitoringApiRoot\"\xf0\x01\n" +
+	"\x13monitoring_api_root\x18\x02 \x01(\tR\x11monitoringApiRoot\x12\x1f\n" +
+	"\varchive_dir\x18\x03 \x01(\tR\n" +
+	"archiveDir\"\xf0\x01\n" +
 	"\rCheckResponse\x12\x1b\n" +
 	"\ttree_size\x18\x01 \x01(\x03R\btreeSize\x12'\n" +
 	"\x0ftotal_processed\x18\x02 \x01(\x03R\x0etotalProcessed\x12!\n" +

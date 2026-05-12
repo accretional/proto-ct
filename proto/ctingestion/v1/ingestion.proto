@@ -18,12 +18,15 @@ message IngestRequest {
   string monitoring_api_root = 1;
   // Number of log entries to mirror this session.
   int64 batch_size = 2;
-  // Base output directory. Databases are placed in a YYYYMMDD subdirectory
-  // (rotating at local midnight). progress.db sits at the root.
+  // Active staging directory (fast local storage). Dated YYYYMMDD subdirs are
+  // written here during ingestion and promoted to archive_dir on daily rollover.
   string output_dir = 3;
   // Target maximum QPS to the monitoring endpoint. Actual rate is ~80% of this.
   // 0 = unlimited.
   double target_qps = 4;
+  // Persistent archive directory (durable storage). Receives completed dated dirs
+  // on rollover. progress.db always lives here.
+  string archive_dir = 5;
 }
 
 // SubjectRecord is streamed back for each mirrored certificate subject.
@@ -47,8 +50,9 @@ message SubjectRecord {
 // CheckRequest selects which mirror to inspect.
 // If fields are empty the server uses values from the most recent IngestLog call.
 message CheckRequest {
-  string output_dir          = 1;
+  string output_dir          = 1;  // active staging dir
   string monitoring_api_root = 2;
+  string archive_dir         = 3;  // persistent archive dir (for progress.db + old dated dirs)
 }
 
 // CheckResponse carries current mirroring progress and storage metrics.

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"os"
@@ -25,10 +26,11 @@ import (
 type Service struct {
 	pb.UnimplementedCTIngestionServiceServer
 
-	mu            sync.RWMutex
-	lastOutputDir string
-	lastRoot      string
-	lastMetrics   *pb.CheckResponse // refreshed every 5 min during IngestLog
+	mu             sync.RWMutex
+	lastActiveDir  string
+	lastArchiveDir string
+	lastRoot       string
+	lastMetrics    *pb.CheckResponse // refreshed every 5 min during IngestLog
 }
 
 type issuerInfo struct {
@@ -41,12 +43,16 @@ type issuerInfo struct {
 // ── Check ────────────────────────────────────────────────────────────────────
 
 func (s *Service) Check(ctx context.Context, req *pb.CheckRequest) (*pb.CheckResponse, error) {
-	outputDir := req.OutputDir
+	activeDir := req.OutputDir
+	archiveDir := req.ArchiveDir
 	root := req.MonitoringApiRoot
 
 	s.mu.RLock()
-	if outputDir == "" {
-		outputDir = s.lastOutputDir
+	if activeDir == "" {
+		activeDir = s.lastActiveDir
+	}
+	if archiveDir == "" {
+		archiveDir = s.lastArchiveDir
 	}
 	if root == "" {
 		root = s.lastRoot
@@ -54,32 +60,34 @@ func (s *Service) Check(ctx context.Context, req *pb.CheckRequest) (*pb.CheckRes
 	cached := s.lastMetrics
 	s.mu.RUnlock()
 
-	// Return the cached snapshot if it was computed within the last 10 s and
-	// the caller didn't specify explicit coordinates.
+	// Return cached snapshot if fresh and caller supplied no explicit coords.
 	if cached != nil && req.OutputDir == "" && req.MonitoringApiRoot == "" {
 		if t, err := time.Parse(time.RFC3339, cached.UpdatedAt); err == nil && time.Since(t) < 10*time.Second {
 			return cached, nil
 		}
 	}
 
-	if outputDir == "" {
+	if archiveDir == "" {
 		return nil, status.Error(codes.InvalidArgument,
-			"output_dir required (no prior IngestLog call on this server)")
+			"archive_dir required (no prior IngestLog call on this server)")
 	}
 
-	resp, err := computeMetrics(ctx, outputDir, root)
+	resp, err := computeMetrics(ctx, activeDir, archiveDir, root)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "compute metrics: %v", err)
 	}
-	s.setMetrics(resp, outputDir, root)
+	s.setMetrics(resp, activeDir, archiveDir, root)
 	return resp, nil
 }
 
-func (s *Service) setMetrics(m *pb.CheckResponse, outputDir, root string) {
+func (s *Service) setMetrics(m *pb.CheckResponse, activeDir, archiveDir, root string) {
 	s.mu.Lock()
 	s.lastMetrics = m
-	if outputDir != "" {
-		s.lastOutputDir = outputDir
+	if activeDir != "" {
+		s.lastActiveDir = activeDir
+	}
+	if archiveDir != "" {
+		s.lastArchiveDir = archiveDir
 	}
 	if root != "" {
 		s.lastRoot = root
@@ -99,28 +107,40 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 		return status.Error(codes.InvalidArgument, "batch_size must be non-negative (0 = continuous)")
 	}
 
-	outputDir := req.OutputDir
-	if outputDir == "" {
-		outputDir = "/Volumes/wd_office_2/datasets/CT/"
+	activeDir := req.OutputDir
+	if activeDir == "" {
+		activeDir = "data/active/"
 	}
-	if !strings.HasSuffix(outputDir, "/") {
-		outputDir += "/"
-	}
-	s.setMetrics(nil, outputDir, req.MonitoringApiRoot)
-
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return status.Errorf(codes.Internal, "mkdir output dir: %v", err)
+	if !strings.HasSuffix(activeDir, "/") {
+		activeDir += "/"
 	}
 
-	// progress.db lives at the root — undated — so resumption works across sessions.
-	progressDB, err := db.OpenProgressDB(filepath.Join(outputDir, "progress.db"))
+	archiveDir := req.ArchiveDir
+	if archiveDir == "" {
+		archiveDir = "/Volumes/wd_office_2/datasets/CT/"
+	}
+	if !strings.HasSuffix(archiveDir, "/") {
+		archiveDir += "/"
+	}
+
+	s.setMetrics(nil, activeDir, archiveDir, req.MonitoringApiRoot)
+
+	if err := os.MkdirAll(activeDir, 0o755); err != nil {
+		return status.Errorf(codes.Internal, "mkdir active dir: %v", err)
+	}
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		return status.Errorf(codes.Internal, "mkdir archive dir: %v", err)
+	}
+
+	// progress.db lives in the archive dir — durable across sessions and reboots.
+	progressDB, err := db.OpenProgressDB(filepath.Join(archiveDir, "progress.db"))
 	if err != nil {
 		return status.Errorf(codes.Internal, "open progress db: %v", err)
 	}
 	defer progressDB.Close()
 
-	// Open metrics log for appending.
-	logFile, err := openIngestionLog(outputDir)
+	// Metrics log also goes in the archive dir alongside progress.db.
+	logFile, err := openIngestionLog(archiveDir)
 	if err != nil {
 		log.Printf("warn: cannot open ingestion.log: %v", err)
 	} else {
@@ -128,7 +148,7 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 	}
 
 	// Start the periodic metrics goroutine (every 5 min).
-	go s.metricsLoop(ctx, outputDir, req.MonitoringApiRoot, logFile)
+	go s.metricsLoop(ctx, activeDir, archiveDir, req.MonitoringApiRoot, logFile)
 
 	// Resume: find or create a run record for this monitoring root.
 	run, err := progressDB.GetOrCreateRun(req.MonitoringApiRoot)
@@ -148,9 +168,9 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 	globalProcessed := run.TotalProcessed
 	tileIdx := run.NextTileIdx
 
-	// Dated run directory — rotates at local midnight.
+	// Dated run directory lives in activeDir (SSD). Rotates at local midnight.
 	currentDate := time.Now().Local().Format("20060102")
-	runDir := filepath.Join(outputDir, currentDate)
+	runDir := filepath.Join(activeDir, currentDate)
 	issuerDB, subjectDB, err := openDatedDBs(runDir)
 	if err != nil {
 		return status.Errorf(codes.Internal, "open dated dbs: %v", err)
@@ -161,7 +181,7 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 
 	// Sliding-window prefetch: keep tileFetchLookahead tile fetches in flight
 	// at all times so HTTP latency is hidden behind write time.
-	const tileFetchLookahead = 16
+	const tileFetchLookahead = 128
 	type tileResult struct {
 		leaves []*ctlog.TileLeaf
 		err    error
@@ -188,13 +208,17 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 			return status.FromContextError(err).Err()
 		}
 
-		// Daily cutover: rotate databases at local midnight.
+		// Daily cutover: checkpoint+close old DBs, archive them, open new day on SSD.
 		if today := time.Now().Local().Format("20060102"); today != currentDate {
-			log.Printf("date rollover %s → %s: rotating databases", currentDate, today)
-			issuerDB.Close()
-			subjectDB.Close()
+			log.Printf("date rollover %s → %s: archiving and rotating databases", currentDate, today)
+			issuerDB.CheckpointAndClose()
+			subjectDB.CheckpointAndClose()
+			// Copy completed dated dir from SSD to archive in background.
+			completedActive := filepath.Join(activeDir, currentDate)
+			completedArchive := filepath.Join(archiveDir, currentDate)
+			go archiveDateDir(completedActive, completedArchive)
 			currentDate = today
-			runDir = filepath.Join(outputDir, currentDate)
+			runDir = filepath.Join(activeDir, currentDate)
 			issuerDB, subjectDB, err = openDatedDBs(runDir)
 			if err != nil {
 				return status.Errorf(codes.Internal, "open rotated dbs: %v", err)
@@ -281,9 +305,9 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 }
 
 // metricsLoop runs every 5 minutes, logging metrics to stderr and logFile.
-func (s *Service) metricsLoop(ctx context.Context, outputDir, root string, logFile *os.File) {
+func (s *Service) metricsLoop(ctx context.Context, activeDir, archiveDir, root string, logFile *os.File) {
 	emit := func() {
-		resp, err := computeMetrics(ctx, outputDir, root)
+		resp, err := computeMetrics(ctx, activeDir, archiveDir, root)
 		if err != nil {
 			log.Printf("metrics error: %v", err)
 			return
@@ -292,7 +316,7 @@ func (s *Service) metricsLoop(ctx context.Context, outputDir, root string, logFi
 		if logFile != nil {
 			writeMetricsLine(logFile, resp)
 		}
-		s.setMetrics(resp, outputDir, root)
+		s.setMetrics(resp, activeDir, archiveDir, root)
 	}
 
 	emit() // immediate first snapshot
@@ -323,6 +347,56 @@ func openDatedDBs(runDir string) (*db.IssuerDB, *db.SubjectDB, error) {
 		return nil, nil, err
 	}
 	return issuerDB, subjectDB, nil
+}
+
+// ── archiveDateDir ───────────────────────────────────────────────────────────
+
+// archiveDateDir copies src (a completed YYYYMMDD dir on the SSD) to dst (on
+// the archive drive), then removes src to free SSD space. Run in a goroutine.
+func archiveDateDir(src, dst string) {
+	if err := copyDir(src, dst); err != nil {
+		log.Printf("archive: copy %s → %s: %v", src, dst, err)
+		return
+	}
+	if err := os.RemoveAll(src); err != nil {
+		log.Printf("archive: remove %s: %v", src, err)
+		return
+	}
+	log.Printf("archive: %s → %s complete", src, dst)
+}
+
+// copyDir copies all regular files from src to dst, creating dst if needed.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFile(path, target)
+	})
+}
+
+// copyFile copies a single file, creating the destination directory if needed.
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // ── prefetchIssuers ──────────────────────────────────────────────────────────

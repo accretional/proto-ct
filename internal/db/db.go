@@ -89,6 +89,13 @@ func (idb *IssuerDB) UpsertIssuer(fp [32]byte, commonName, organization, country
 	return res.LastInsertId()
 }
 
+// CheckpointAndClose flushes the WAL into the main file before closing.
+// This leaves the database file in a consistent, copyable state with no WAL.
+func (idb *IssuerDB) CheckpointAndClose() error {
+	idb.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`) //nolint:errcheck
+	return idb.db.Close()
+}
+
 // Close closes the database.
 func (idb *IssuerDB) Close() error { return idb.db.Close() }
 
@@ -203,6 +210,12 @@ func (sdb *SubjectDB) InsertSubjectBatch(subjects []Subject) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// CheckpointAndClose flushes the WAL into the main file before closing.
+func (sdb *SubjectDB) CheckpointAndClose() error {
+	sdb.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`) //nolint:errcheck
+	return sdb.db.Close()
 }
 
 // Close closes the database.

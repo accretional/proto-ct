@@ -42,8 +42,13 @@ func NewClient(tileDataRoot string, targetQPS float64) *Client {
 		lim = rate.NewLimiter(actual, burst)
 	}
 
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 512,
+		MaxConnsPerHost:     512,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	return &Client{
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		httpClient:   &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		tileDataRoot: tileDataRoot,
 		logRoot:      logRoot,
 		limiter:      lim,

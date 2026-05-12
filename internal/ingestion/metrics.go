@@ -15,27 +15,35 @@ import (
 )
 
 // computeMetrics assembles a CheckResponse by reading the progress DB, walking
-// the output directory for file sizes, and fetching the live tree size.
-func computeMetrics(ctx context.Context, outputDir, monitoringRoot string) (*pb.CheckResponse, error) {
+// both the active and archive directories for file sizes, and fetching the live
+// tree size.
+func computeMetrics(ctx context.Context, activeDir, archiveDir, monitoringRoot string) (*pb.CheckResponse, error) {
 	resp := &pb.CheckResponse{
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Sum all SQLite files under outputDir.
-	_ = filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".db") {
-			return nil
+	// Sum all SQLite files under both dirs (active has today's, archive has all prior days').
+	walkDir := func(dir string) {
+		if dir == "" {
+			return
 		}
-		resp.DbFiles = append(resp.DbFiles, &pb.DbInfo{
-			Path:      path,
-			SizeBytes: info.Size(),
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".db") {
+				return nil
+			}
+			resp.DbFiles = append(resp.DbFiles, &pb.DbInfo{
+				Path:      path,
+				SizeBytes: info.Size(),
+			})
+			resp.DbBytesTotal += info.Size()
+			return nil
 		})
-		resp.DbBytesTotal += info.Size()
-		return nil
-	})
+	}
+	walkDir(activeDir)
+	walkDir(archiveDir)
 
-	// Total entries mirrored from progress DB.
-	progressPath := filepath.Join(outputDir, "progress.db")
+	// Total entries mirrored from progress DB (lives in archive dir).
+	progressPath := filepath.Join(archiveDir, "progress.db")
 	if pdb, err := db.OpenProgressDB(progressPath); err == nil {
 		if n, err := pdb.GetTotalProcessed(monitoringRoot); err == nil {
 			resp.TotalProcessed = n
