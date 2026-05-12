@@ -27,6 +27,9 @@ message IngestRequest {
   // Persistent archive directory (durable storage). Receives completed dated dirs
   // on rollover. progress.db always lives here.
   string archive_dir = 5;
+  // Roll over the active subjects.db to the archive drive whenever its size
+  // (main file + WAL) reaches this threshold. 0 = disabled.
+  int64 size_rollover_bytes = 6;
 }
 
 // SubjectRecord is streamed back for each mirrored certificate subject.

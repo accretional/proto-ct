@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -165,6 +166,62 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`) //nolint:errcheck
 
 	return &SubjectDB{db: db}, nil
+}
+
+// subjectCols is the explicit column list used for cross-database INSERT to
+// avoid autoincrement id conflicts.
+const subjectCols = `ca_id, serial_number, common_name, organization, state, country,
+	not_before, not_after, san_domains, san_ips, url,
+	is_wildcard, san_count, entry_type, tile_idx, entry_idx`
+
+// MergeSubjectDBs appends all rows from srcPath into dstPath, skipping
+// duplicates on (tile_idx, entry_idx). The id column is omitted so the
+// destination assigns fresh autoincrement values — avoiding PK conflicts.
+func MergeSubjectDBs(srcPath, dstPath string) error {
+	dst, err := sql.Open("sqlite", dstPath)
+	if err != nil {
+		return fmt.Errorf("open dst subjects: %w", err)
+	}
+	defer dst.Close()
+	dst.SetMaxOpenConns(1)
+	if _, err := dst.Exec(`PRAGMA synchronous=OFF; PRAGMA cache_size=-524288; PRAGMA temp_store=MEMORY;`); err != nil {
+		return err
+	}
+	if _, err := dst.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
+		return fmt.Errorf("attach src subjects: %w", err)
+	}
+	if _, err := dst.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
+		SELECT ` + subjectCols + ` FROM src.subjects`); err != nil {
+		return fmt.Errorf("merge subjects rows: %w", err)
+	}
+	_, err = dst.Exec(`DETACH src`)
+	return err
+}
+
+// MergeIssuerDBs appends all rows from srcPath into dstPath, skipping
+// duplicates on fingerprint. ca_id is omitted so fresh values are assigned.
+func MergeIssuerDBs(srcPath, dstPath string) error {
+	if _, err := os.Stat(srcPath); err != nil {
+		return nil // nothing to merge if src doesn't exist
+	}
+	dst, err := sql.Open("sqlite", dstPath)
+	if err != nil {
+		return fmt.Errorf("open dst issuers: %w", err)
+	}
+	defer dst.Close()
+	dst.SetMaxOpenConns(1)
+	if _, err := dst.Exec(`PRAGMA synchronous=OFF;`); err != nil {
+		return err
+	}
+	if _, err := dst.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
+		return fmt.Errorf("attach src issuers: %w", err)
+	}
+	if _, err := dst.Exec(`INSERT OR IGNORE INTO issuers (fingerprint, common_name, organization, country)
+		SELECT fingerprint, common_name, organization, country FROM src.issuers`); err != nil {
+		return fmt.Errorf("merge issuer rows: %w", err)
+	}
+	_, err = dst.Exec(`DETACH src`)
+	return err
 }
 
 // BuildQueryIndexes creates the read-oriented indexes on a subjects.db that was

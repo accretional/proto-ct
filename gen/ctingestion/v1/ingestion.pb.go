@@ -37,9 +37,12 @@ type IngestRequest struct {
 	TargetQps float64 `protobuf:"fixed64,4,opt,name=target_qps,json=targetQps,proto3" json:"target_qps,omitempty"`
 	// Persistent archive directory (durable storage). Receives completed dated dirs
 	// on rollover. progress.db always lives here.
-	ArchiveDir    string `protobuf:"bytes,5,opt,name=archive_dir,json=archiveDir,proto3" json:"archive_dir,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ArchiveDir string `protobuf:"bytes,5,opt,name=archive_dir,json=archiveDir,proto3" json:"archive_dir,omitempty"`
+	// Roll over the active subjects.db to the archive drive whenever its size
+	// (main file + WAL) reaches this threshold. 0 = disabled.
+	SizeRolloverBytes int64 `protobuf:"varint,6,opt,name=size_rollover_bytes,json=sizeRolloverBytes,proto3" json:"size_rollover_bytes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *IngestRequest) Reset() {
@@ -105,6 +108,13 @@ func (x *IngestRequest) GetArchiveDir() string {
 		return x.ArchiveDir
 	}
 	return ""
+}
+
+func (x *IngestRequest) GetSizeRolloverBytes() int64 {
+	if x != nil {
+		return x.SizeRolloverBytes
+	}
+	return 0
 }
 
 // SubjectRecord is streamed back for each mirrored certificate subject.
@@ -460,7 +470,7 @@ var File_ctingestion_v1_ingestion_proto protoreflect.FileDescriptor
 
 const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\n" +
-	"\x1ectingestion/v1/ingestion.proto\x12\x0ectingestion.v1\"\xbd\x01\n" +
+	"\x1ectingestion/v1/ingestion.proto\x12\x0ectingestion.v1\"\xed\x01\n" +
 	"\rIngestRequest\x12.\n" +
 	"\x13monitoring_api_root\x18\x01 \x01(\tR\x11monitoringApiRoot\x12\x1d\n" +
 	"\n" +
@@ -470,7 +480,8 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\n" +
 	"target_qps\x18\x04 \x01(\x01R\ttargetQps\x12\x1f\n" +
 	"\varchive_dir\x18\x05 \x01(\tR\n" +
-	"archiveDir\"\xd1\x03\n" +
+	"archiveDir\x12.\n" +
+	"\x13size_rollover_bytes\x18\x06 \x01(\x03R\x11sizeRolloverBytes\"\xd1\x03\n" +
 	"\rSubjectRecord\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x1f\n" +
 	"\vcommon_name\x18\x02 \x01(\tR\n" +

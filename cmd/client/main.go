@@ -23,6 +23,7 @@ var (
 	targetQPS   = flag.Float64("qps", 500, "target QPS to monitoring endpoint (actual = 80%); 0 = unlimited")
 	checkMode   = flag.Bool("check", false, "run a one-shot metrics check instead of ingesting")
 	continuous  = flag.Bool("continuous", false, "mirror until fully caught up with the live log (no batch limit)")
+	sizeLimit   = flag.Int64("size-limit", 50, "roll over active DB to archive when subjects.db reaches this size in GiB (0 = disabled)")
 )
 
 func main() {
@@ -81,6 +82,7 @@ func runIngest(ctx context.Context, client pb.CTIngestionServiceClient) {
 		OutputDir:         *activeDir,
 		ArchiveDir:        *archiveDir,
 		TargetQps:         *targetQPS,
+		SizeRolloverBytes: *sizeLimit * 1024 * 1024 * 1024,
 	}
 	if *continuous {
 		log.Printf("starting continuous mirror: qps=%.0f active=%s archive=%s",
