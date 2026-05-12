@@ -351,9 +351,15 @@ func openDatedDBs(runDir string) (*db.IssuerDB, *db.SubjectDB, error) {
 
 // ── archiveDateDir ───────────────────────────────────────────────────────────
 
-// archiveDateDir copies src (a completed YYYYMMDD dir on the SSD) to dst (on
-// the archive drive), then removes src to free SSD space. Run in a goroutine.
+// archiveDateDir builds query indexes on the SSD copy, copies it to the archive
+// drive, then removes the SSD copy to free space. Run in a goroutine.
 func archiveDateDir(src, dst string) {
+	subjectsPath := filepath.Join(src, "subjects.db")
+	log.Printf("archive: building query indexes on %s", subjectsPath)
+	if err := db.BuildQueryIndexes(subjectsPath); err != nil {
+		log.Printf("archive: build indexes %s: %v", subjectsPath, err)
+		// Non-fatal: copy the unindexed file anyway.
+	}
 	if err := copyDir(src, dst); err != nil {
 		log.Printf("archive: copy %s → %s: %v", src, dst, err)
 		return

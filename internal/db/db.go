@@ -99,16 +99,20 @@ func (idb *IssuerDB) CheckpointAndClose() error {
 // Close closes the database.
 func (idb *IssuerDB) Close() error { return idb.db.Close() }
 
-// OpenSubjectDB opens or creates the subject database at path.
-// Applies schema migrations so older databases gain new columns automatically.
+// OpenSubjectDB opens or creates the subject database at path, configured for
+// write-optimised ingestion. Query indexes (ca_id, cn, not_after, wildcard) are
+// intentionally omitted — call BuildQueryIndexes before archiving.
 func OpenSubjectDB(path string) (*SubjectDB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open subject db: %w", err)
 	}
+	// Single writer only — hold the exclusive lock for the connection lifetime.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(`
 		PRAGMA journal_mode=WAL;
-		PRAGMA synchronous=NORMAL;
+		PRAGMA synchronous=OFF;
+		PRAGMA locking_mode=EXCLUSIVE;
 		PRAGMA cache_size=-524288;
 		PRAGMA wal_autocheckpoint=20000;
 		PRAGMA temp_store=MEMORY;
@@ -139,10 +143,6 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 			tile_idx      INTEGER,
 			entry_idx     INTEGER
 		);
-		CREATE INDEX IF NOT EXISTS idx_subjects_ca_id    ON subjects(ca_id);
-		CREATE INDEX IF NOT EXISTS idx_subjects_cn       ON subjects(common_name);
-		CREATE INDEX IF NOT EXISTS idx_subjects_not_after ON subjects(not_after);
-		CREATE INDEX IF NOT EXISTS idx_subjects_wildcard  ON subjects(is_wildcard);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx);
 	`); err != nil {
 		db.Close()
@@ -150,7 +150,6 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 	}
 
 	// Additive migrations for databases created before new columns existed.
-	// ALTER TABLE ADD COLUMN returns an error if the column already exists; we ignore it.
 	migrations := []string{
 		`ALTER TABLE subjects ADD COLUMN san_ips     TEXT`,
 		`ALTER TABLE subjects ADD COLUMN is_wildcard INTEGER DEFAULT 0`,
@@ -160,18 +159,36 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 		`ALTER TABLE subjects ADD COLUMN entry_idx   INTEGER`,
 	}
 	for _, m := range migrations {
-		db.Exec(m) //nolint:errcheck — duplicate column errors are expected and safe to ignore
+		db.Exec(m) //nolint:errcheck
 	}
-	// Indexes may also be missing on older databases.
-	for _, idx := range []string{
-		`CREATE INDEX IF NOT EXISTS idx_subjects_not_after  ON subjects(not_after)`,
-		`CREATE INDEX IF NOT EXISTS idx_subjects_wildcard   ON subjects(is_wildcard)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`,
-	} {
-		db.Exec(idx) //nolint:errcheck
-	}
+	// Ensure the idempotency index exists on older databases.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`) //nolint:errcheck
 
 	return &SubjectDB{db: db}, nil
+}
+
+// BuildQueryIndexes creates the read-oriented indexes on a subjects.db that was
+// opened for write-only ingestion. Call this on the SSD copy before archiving.
+func BuildQueryIndexes(path string) error {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("open for indexing: %w", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA synchronous=OFF; PRAGMA cache_size=-524288;`); err != nil {
+		return err
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_subjects_ca_id     ON subjects(ca_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_subjects_cn        ON subjects(common_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_subjects_not_after ON subjects(not_after)`,
+		`CREATE INDEX IF NOT EXISTS idx_subjects_wildcard  ON subjects(is_wildcard)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("create index: %w", err)
+		}
+	}
+	return nil
 }
 
 // InsertSubject records a certificate subject. Silently ignores duplicate tile+entry.
