@@ -102,9 +102,10 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 	if _, err := db.Exec(`
 		PRAGMA journal_mode=WAL;
 		PRAGMA synchronous=NORMAL;
-		PRAGMA cache_size=-65536;
-		PRAGMA wal_autocheckpoint=10000;
+		PRAGMA cache_size=-524288;
+		PRAGMA wal_autocheckpoint=20000;
 		PRAGMA temp_store=MEMORY;
+		PRAGMA mmap_size=2147483648;
 	`); err != nil {
 		db.Close()
 		return nil, err

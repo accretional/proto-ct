@@ -159,6 +159,28 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 	continuous := req.BatchSize == 0
 	totalTarget := int(req.BatchSize)
 
+	// Sliding-window prefetch: keep tileFetchLookahead tile fetches in flight
+	// at all times so HTTP latency is hidden behind write time.
+	const tileFetchLookahead = 16
+	type tileResult struct {
+		leaves []*ctlog.TileLeaf
+		err    error
+	}
+	fetchBuf := make([]chan tileResult, tileFetchLookahead)
+	startTile := tileIdx
+	launchFetch := func(idx int, ch chan<- tileResult) {
+		go func() {
+			leaves, err := client.FetchTile(ctx, idx, 256)
+			ch <- tileResult{leaves, err}
+		}()
+	}
+	for i := 0; i < tileFetchLookahead; i++ {
+		ch := make(chan tileResult, 1)
+		fetchBuf[i] = ch
+		launchFetch(startTile+i, ch)
+	}
+	nextFetch := startTile + tileFetchLookahead
+
 	for continuous || sessionProcessed < totalTarget {
 		if err := ctx.Err(); err != nil {
 			issuerDB.Close()
@@ -180,30 +202,34 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 			clear(issuerCache) // ca_ids restart in the new issuerDB
 		}
 
-		maxFromTile := 256
-		if !continuous {
-			maxFromTile = min(totalTarget-sessionProcessed, 256)
+		// Wait for the next tile from the prefetch window.
+		slot := (tileIdx - startTile) % tileFetchLookahead
+		result := <-fetchBuf[slot]
+
+		// Immediately dispatch the next fetch into the freed slot.
+		newCh := make(chan tileResult, 1)
+		fetchBuf[slot] = newCh
+		launchFetch(nextFetch, newCh)
+		nextFetch++
+
+		if result.err != nil {
+			issuerDB.Close()
+			subjectDB.Close()
+			if continuous && ctlog.IsNotFound(result.err) {
+				log.Printf("caught up at tile %d (total mirrored: %d)", tileIdx, globalProcessed)
+				return nil
+			}
+			return status.Errorf(codes.Internal, "fetch tile %d: %v", tileIdx, result.err)
+		}
+		if len(result.leaves) == 0 {
+			break
 		}
 
 		log.Printf("tile %d  session %d  total %d",
 			tileIdx, sessionProcessed, globalProcessed)
 
-		leaves, err := client.FetchTile(ctx, tileIdx, maxFromTile)
-		if err != nil {
-			issuerDB.Close()
-			subjectDB.Close()
-			if continuous && ctlog.IsNotFound(err) {
-				log.Printf("caught up at tile %d (total mirrored: %d)", tileIdx, globalProcessed)
-				return nil
-			}
-			return status.Errorf(codes.Internal, "fetch tile %d: %v", tileIdx, err)
-		}
-		if len(leaves) == 0 {
-			break
-		}
-
 		// Parallel-fetch all new issuer certs for this tile, then serial DB writes.
-		if err := prefetchIssuers(ctx, leaves, client, issuerDB, issuerCache); err != nil {
+		if err := prefetchIssuers(ctx, result.leaves, client, issuerDB, issuerCache); err != nil {
 			log.Printf("warn: prefetch issuers tile %d: %v", tileIdx, err)
 		}
 
@@ -211,7 +237,7 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 
 		var batch []db.Subject
 		var recs []*pb.SubjectRecord
-		for entryIdx, leaf := range leaves {
+		for entryIdx, leaf := range result.leaves {
 			if !continuous && sessionProcessed >= totalTarget {
 				break
 			}
