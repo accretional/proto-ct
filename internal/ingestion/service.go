@@ -243,12 +243,18 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 		nextFetch++
 
 		if result.err != nil {
-			issuerDB.Close()
-			subjectDB.Close()
 			if continuous && ctlog.IsNotFound(result.err) {
 				log.Printf("caught up at tile %d (total mirrored: %d)", tileIdx, globalProcessed)
+				issuerDB.CheckpointAndClose()
+				subjectDB.CheckpointAndClose()
+				go archiveDateDir(
+					filepath.Join(activeDir, currentDate),
+					filepath.Join(archiveDir, currentDate),
+				)
 				return nil
 			}
+			issuerDB.Close()
+			subjectDB.Close()
 			return status.Errorf(codes.Internal, "fetch tile %d: %v", tileIdx, result.err)
 		}
 		if len(result.leaves) == 0 {

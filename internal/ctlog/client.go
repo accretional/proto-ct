@@ -175,10 +175,12 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("HTTP %d for %s", e.code, e.url)
 }
 
-// IsNotFound reports whether err was caused by an HTTP 404 response.
+// IsNotFound reports whether err signals the log frontier.
+// LE's monitoring endpoint returns 403 (not 404) for tiles past the current tree,
+// so both are treated as "no tile here yet."
 func IsNotFound(err error) bool {
 	var he *httpError
-	return errors.As(err, &he) && he.code == http.StatusNotFound
+	return errors.As(err, &he) && (he.code == http.StatusNotFound || he.code == http.StatusForbidden)
 }
 
 func isFatalHTTP(err error) bool {
