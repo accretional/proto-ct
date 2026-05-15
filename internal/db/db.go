@@ -177,25 +177,92 @@ const subjectCols = `ca_id, serial_number, common_name, organization, state, cou
 // MergeSubjectDBs appends all rows from srcPath into dstPath, skipping
 // duplicates on (tile_idx, entry_idx). The id column is omitted so the
 // destination assigns fresh autoincrement values — avoiding PK conflicts.
+//
+// Instead of inserting into the existing dstPath (which fragments the B-tree
+// as new pages are appended non-contiguously), this builds a brand-new file
+// with all rows written sequentially, then atomically replaces dstPath.
+// The result is a compact, unfragmented database with fast sequential reads.
 func MergeSubjectDBs(srcPath, dstPath string) error {
-	dst, err := sql.Open("sqlite", dstPath)
-	if err != nil {
-		return fmt.Errorf("open dst subjects: %w", err)
-	}
-	defer dst.Close()
-	dst.SetMaxOpenConns(1)
-	if _, err := dst.Exec(`PRAGMA synchronous=OFF; PRAGMA cache_size=-524288; PRAGMA temp_store=MEMORY;`); err != nil {
+	newPath := dstPath + ".new"
+	os.Remove(newPath) // remove any stale file from a prior interrupted run
+	if err := buildMergedSubjectDB(dstPath, srcPath, newPath); err != nil {
+		os.Remove(newPath)
 		return err
 	}
-	if _, err := dst.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
+	// Atomically replace the old file. Clean up WAL artifacts from the old DB
+	// first so the new file isn't mistakenly paired with a stale WAL.
+	os.Remove(dstPath + "-wal")
+	os.Remove(dstPath + "-shm")
+	if err := os.Remove(dstPath); err != nil {
+		os.Remove(newPath)
+		return fmt.Errorf("remove old subjects db: %w", err)
+	}
+	return os.Rename(newPath, dstPath)
+}
+
+// buildMergedSubjectDB creates newPath as a fresh subjects database containing
+// all rows from existingPath followed by non-duplicate rows from srcPath.
+// Uses journal_mode=OFF since newPath is a build-once file: if interrupted,
+// the caller removes it and retries from scratch.
+func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
+	db, err := sql.Open("sqlite", newPath)
+	if err != nil {
+		return fmt.Errorf("create merged subjects db: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=OFF;
+		PRAGMA synchronous=OFF;
+		PRAGMA cache_size=-524288;
+		PRAGMA temp_store=MEMORY;
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE subjects (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			ca_id         INTEGER NOT NULL,
+			serial_number TEXT,
+			common_name   TEXT,
+			organization  TEXT,
+			state         TEXT,
+			country       TEXT,
+			not_before    TEXT,
+			not_after     TEXT,
+			san_domains   TEXT,
+			san_ips       TEXT,
+			url           TEXT,
+			is_wildcard   INTEGER DEFAULT 0,
+			san_count     INTEGER DEFAULT 0,
+			entry_type    TEXT    DEFAULT 'x509',
+			tile_idx      INTEGER,
+			entry_idx     INTEGER
+		);
+		CREATE UNIQUE INDEX idx_subjects_tile_entry ON subjects(tile_idx, entry_idx);
+	`); err != nil {
+		return fmt.Errorf("create schema in merged db: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ATTACH '%s' AS existing`, existingPath)); err != nil {
+		return fmt.Errorf("attach existing subjects: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
 		return fmt.Errorf("attach src subjects: %w", err)
 	}
-	if _, err := dst.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
-		SELECT ` + subjectCols + ` FROM src.subjects`); err != nil {
-		return fmt.Errorf("merge subjects rows: %w", err)
+	// All existing archive rows first — written as sequential fresh pages.
+	if _, err := db.Exec(`INSERT INTO subjects (` + subjectCols + `)
+		SELECT ` + subjectCols + ` FROM existing.subjects`); err != nil {
+		return fmt.Errorf("copy existing subjects: %w", err)
 	}
-	_, err = dst.Exec(`DETACH src`)
-	return err
+	// New rows from the active DB, skipping any already present.
+	if _, err := db.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
+		SELECT ` + subjectCols + ` FROM src.subjects`); err != nil {
+		return fmt.Errorf("merge src subjects: %w", err)
+	}
+	if _, err := db.Exec(`DETACH existing; DETACH src`); err != nil {
+		return err
+	}
+	return nil
 }
 
 // MergeIssuerDBs appends all rows from srcPath into dstPath, skipping
