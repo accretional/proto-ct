@@ -1,17 +1,32 @@
-// export aggregates DNS SANs from archived subjects.db files into:
-//   subdomains_unique.txt       — one FQDN per line, alphabetical
-//   subdomains_with_count.tsv   — <count>\t<fqdn>, descending by count
+// export aggregates DNS SANs from archived subjects.db files into a sharded,
+// DNS-pipeline-ready dataset.
 //
-// Algorithm:
-//   Phase 1: for each source DB, stream san_domains via SQLite cursor,
-//            accumulate domain counts in a Go map, flush every N rows to a
-//            sorted temp file to cap memory use.
-//   Phase 2: k-way merge of all sorted temp files, summing counts.
-//   Phase 3: sort the merged file by count desc → final output.
+// Pipeline:
 //
-// If source databases have heavily fragmented B-trees (e.g. after large
-// bulk merges), use tools/rawscan instead — it reads pages sequentially
-// bypassing the cursor and is orders of magnitude faster in that case.
+//	Phase 0: for each archive date dir without subjects_export.tsv, scan
+//	         subjects.db and write a co-located sorted three-column TSV
+//	         (domain, direct_count, wildcard_count). Skipped for dirs that
+//	         already have the file, making re-runs incremental.
+//
+//	Phase 1+2: k-way merge all subjects_export.tsv files; fan-out into
+//	           per-eTLD+1 shard files and flat summary files.
+//
+// Shard layout (under --out/shards/):
+//
+//	com/{a-z,0,_other}.tsv   — split by first char of SLD (large TLD)
+//	<tld>/exports.tsv        — all other TLDs in a single file
+//	_other/exports.tsv       — domains with no recognisable public suffix
+//
+// Summary files (under --out/):
+//
+//	subdomains_direct.txt        — FQDNs seen as direct SANs, alphabetical
+//	subdomains_wildcard_only.txt — FQDNs seen only under wildcards, alphabetical
+//	subdomains_counts.tsv        — direct<TAB>wildcard<TAB>domain, desc by direct
+//
+// If source databases have heavily fragmented B-trees (e.g. after large bulk
+// merges), use tools/rawscan to produce subjects_export.tsv for the affected
+// date dirs, then run this tool normally — phase 0 skips dirs that already
+// have the file.
 package main
 
 import (
@@ -29,14 +44,31 @@ import (
 	"strings"
 
 	_ "modernc.org/sqlite"
+	"golang.org/x/net/publicsuffix"
 )
 
 var (
 	baseDir   = flag.String("dir", "/Volumes/wd_office_2/datasets/CT/", "archive base directory")
 	outDir    = flag.String("out", "", "output directory (defaults to base dir)")
-	tmpDir    = flag.String("tmp", "", "directory for temp sorted chunk files (defaults to out dir)")
-	flushRows = flag.Int("flush", 10_000_000, "flush map to disk every N rows to cap memory use")
+	tmpDir    = flag.String("tmp", "", "temp directory for chunk files (defaults to out dir)")
+	flushRows = flag.Int("flush", 10_000_000, "flush map to sorted chunk every N rows")
 )
+
+// largeTLD lists TLDs whose shard files are split by first char of the SLD
+// rather than written to a single exports.tsv. Add a TLD here if its flat
+// shard file would exceed ~2 GB.
+var largeTLD = map[string]bool{
+	"com": true,
+}
+
+// ── packed uint64 helpers ─────────────────────────────────────────────────────
+
+func addDirect(m map[string]uint64, d string)   { m[d]++ }
+func addWildcard(m map[string]uint64, d string) { m[d] += 1 << 32 }
+func directCount(v uint64) uint32               { return uint32(v) }
+func wildcardCount(v uint64) uint32             { return uint32(v >> 32) }
+
+// ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
 	flag.Parse()
@@ -47,59 +79,58 @@ func main() {
 		*tmpDir = *outDir
 	}
 
-	var dbs []string
-	filepath.WalkDir(*baseDir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && d.Name() == "subjects.db" {
-			dbs = append(dbs, path)
+	// Phase 0: produce subjects_export.tsv for each date dir that lacks one.
+	var exports []string
+	err := filepath.WalkDir(*baseDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "subjects.db" {
+			return nil
 		}
+		dateDir := filepath.Dir(path)
+		exportPath := filepath.Join(dateDir, "subjects_export.tsv")
+		if _, statErr := os.Stat(exportPath); statErr == nil {
+			log.Printf("phase 0: [skip] %s", filepath.Base(dateDir))
+		} else {
+			log.Printf("phase 0: scanning %s", path)
+			if buildErr := buildDateExport(path, exportPath, *tmpDir, *flushRows); buildErr != nil {
+				return fmt.Errorf("build export %s: %w", path, buildErr)
+			}
+		}
+		exports = append(exports, exportPath)
 		return nil
 	})
-	if len(dbs) == 0 {
+	if err != nil {
+		log.Fatalf("phase 0: %v", err)
+	}
+	if len(exports) == 0 {
 		log.Fatalf("no subjects.db files found under %s", *baseDir)
 	}
-	log.Printf("found %d subjects.db file(s)", len(dbs))
+	log.Printf("phase 0 complete: %d export file(s)", len(exports))
 
-	// Phase 1: per-file sorted chunk files.
-	var chunks []string
-	for i, dbPath := range dbs {
-		prefix := filepath.Join(*tmpDir, fmt.Sprintf("chunk_%02d", i))
-		log.Printf("[%d/%d] reading %s", i+1, len(dbs), dbPath)
-		parts, err := buildChunks(dbPath, prefix, *flushRows)
-		if err != nil {
-			log.Fatalf("build chunk %s: %v", dbPath, err)
-		}
-		chunks = append(chunks, parts...)
+	// Phase 1+2: merge all per-date exports and fan-out into shards.
+	log.Printf("phase 1+2: merging and sharding %d file(s) ...", len(exports))
+	if err := mergeAndShard(exports, *outDir, *tmpDir); err != nil {
+		log.Fatalf("merge+shard: %v", err)
 	}
-
-	// Phase 2: k-way merge → unique list + alpha-ordered count temp file.
-	uniqueOut := filepath.Join(*outDir, "subdomains_unique.txt")
-	countAlpha := filepath.Join(*tmpDir, "domains_count_alpha.tsv")
-	log.Printf("merging %d chunk files ...", len(chunks))
-	n, err := mergeChunks(chunks, uniqueOut, countAlpha)
-	if err != nil {
-		log.Fatalf("merge: %v", err)
-	}
-	log.Printf("unique FQDNs: %d", n)
-
-	// Phase 3: sort count temp file by count desc → final output.
-	countOut := filepath.Join(*outDir, "subdomains_with_count.tsv")
-	log.Printf("sorting by count desc ...")
-	cmd := exec.Command("sort", "-t\t", "-k1,1rn", "-o", countOut, countAlpha)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("sort counts: %v", err)
-	}
-
-	for _, c := range chunks {
-		os.Remove(c)
-	}
-	os.Remove(countAlpha)
-	log.Printf("done → %s, %s", uniqueOut, countOut)
+	log.Printf("done")
 }
 
-// buildChunks reads san_domains from dbPath via SQLite cursor, flushing the
-// accumulation map to a sorted temp file every flushEvery rows. Returns all
-// temp file paths produced.
+// ── phase 0: per-date-dir export ─────────────────────────────────────────────
+
+// buildDateExport scans a subjects.db and writes a co-located subjects_export.tsv
+// containing domain, direct_count, wildcard_count — sorted by domain.
+func buildDateExport(dbPath, exportPath, tmpDirPath string, flushEvery int) error {
+	prefix := filepath.Join(tmpDirPath, "p0_"+filepath.Base(filepath.Dir(dbPath)))
+	chunks, err := buildChunks(dbPath, prefix, flushEvery)
+	if err != nil {
+		return err
+	}
+	defer removeFiles(chunks)
+	return kMergeToFile(chunks, exportPath)
+}
+
+// buildChunks scans dbPath via SQLite cursor, accumulates domain counts
+// (tracking direct vs wildcard appearances separately), and flushes to
+// sorted three-column chunk files every flushEvery rows.
 func buildChunks(dbPath, prefix string, flushEvery int) ([]string, error) {
 	src, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -117,7 +148,7 @@ func buildChunks(dbPath, prefix string, flushEvery int) ([]string, error) {
 
 	var parts []string
 	partIdx := 0
-	counts := make(map[string]uint32, 1<<21)
+	counts := make(map[string]uint64, 1<<21)
 	rowCount := 0
 
 	flushMap := func() error {
@@ -130,7 +161,7 @@ func buildChunks(dbPath, prefix string, flushEvery int) ([]string, error) {
 			return err
 		}
 		parts = append(parts, path)
-		counts = make(map[string]uint32, 1<<21)
+		counts = make(map[string]uint64, 1<<21)
 		return nil
 	}
 
@@ -140,8 +171,17 @@ func buildChunks(dbPath, prefix string, flushEvery int) ([]string, error) {
 			continue
 		}
 		for _, raw := range strings.Split(sanDomains, ",") {
+			raw = strings.TrimSpace(raw)
+			isWild := strings.HasPrefix(raw, "*.")
+			if isWild {
+				raw = raw[2:]
+			}
 			if d := normalize(raw); d != "" {
-				counts[d]++
+				if isWild {
+					addWildcard(counts, d)
+				} else {
+					addDirect(counts, d)
+				}
 			}
 		}
 		rowCount++
@@ -159,40 +199,225 @@ func buildChunks(dbPath, prefix string, flushEvery int) ([]string, error) {
 	if err := flushMap(); err != nil {
 		return nil, err
 	}
-	log.Printf("  %d rows → %d part(s)", rowCount, len(parts))
+	log.Printf("  %d rows → %d chunk(s)", rowCount, len(parts))
 	return parts, nil
 }
 
-// writeSortedChunk sorts map keys and writes domain\tcount lines to path.
-func writeSortedChunk(counts map[string]uint32, path string) error {
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+// ── phase 1+2: merge + shard ─────────────────────────────────────────────────
 
-	f, err := os.Create(path)
+func mergeAndShard(exports []string, outDir, tmpDirPath string) error {
+	shardsDir := filepath.Join(outDir, "shards")
+	directOut := filepath.Join(outDir, "subdomains_direct.txt")
+	wildOut := filepath.Join(outDir, "subdomains_wildcard_only.txt")
+	countAlpha := filepath.Join(tmpDirPath, "domains_count_alpha.tsv")
+	countOut := filepath.Join(outDir, "subdomains_counts.tsv")
+
+	df, err := os.Create(directOut)
 	if err != nil {
 		return err
 	}
-	w := bufio.NewWriterSize(f, 1<<20)
-	for _, k := range keys {
-		fmt.Fprintf(w, "%s\t%d\n", k, counts[k])
-	}
-	if err := w.Flush(); err != nil {
-		f.Close()
+	defer df.Close()
+	dw := bufio.NewWriterSize(df, 1<<20)
+
+	wf, err := os.Create(wildOut)
+	if err != nil {
 		return err
 	}
-	return f.Close()
+	defer wf.Close()
+	ww := bufio.NewWriterSize(wf, 1<<20)
+
+	cf, err := os.Create(countAlpha)
+	if err != nil {
+		return err
+	}
+	defer cf.Close()
+	cw := bufio.NewWriterSize(cf, 1<<20)
+
+	type shardWriter struct {
+		f *os.File
+		w *bufio.Writer
+	}
+	shardWriters := map[string]*shardWriter{}
+	openShard := func(path string) (*shardWriter, error) {
+		if sw, ok := shardWriters[path]; ok {
+			return sw, nil
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
+		f, err := os.Create(path)
+		if err != nil {
+			return nil, err
+		}
+		sw := &shardWriter{f: f, w: bufio.NewWriterSize(f, 256<<10)}
+		shardWriters[path] = sw
+		return sw, nil
+	}
+
+	var totalDirect, totalWild int64
+	mergeErr := kMerge(exports, func(domain string, direct, wildcard uint32) error {
+		tld, bucket := shardKey(domain)
+		sw, err := openShard(filepath.Join(shardsDir, tld, bucket+".tsv"))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(sw.w, "%s\t%d\t%d\n", domain, direct, wildcard)
+
+		if direct > 0 {
+			dw.WriteString(domain)
+			dw.WriteByte('\n')
+			totalDirect++
+		} else {
+			ww.WriteString(domain)
+			ww.WriteByte('\n')
+			totalWild++
+		}
+		fmt.Fprintf(cw, "%d\t%d\t%s\n", direct, wildcard, domain)
+		return nil
+	})
+
+	for _, sw := range shardWriters {
+		sw.w.Flush()
+		sw.f.Close()
+	}
+	if mergeErr != nil {
+		return mergeErr
+	}
+	if err := dw.Flush(); err != nil {
+		return err
+	}
+	if err := ww.Flush(); err != nil {
+		return err
+	}
+	if err := cw.Flush(); err != nil {
+		return err
+	}
+	cf.Close()
+
+	log.Printf("unique FQDNs: %d direct, %d wildcard-only", totalDirect, totalWild)
+	log.Printf("sorting counts ...")
+	cmd := exec.Command("sort", "-t\t", "-k1,1rn", "-o", countOut, countAlpha)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("sort counts: %w", err)
+	}
+	os.Remove(countAlpha)
+	return nil
+}
+
+// shardKey returns the TLD directory and bucket filename (without .tsv extension)
+// for the given normalized FQDN, using the public suffix list.
+func shardKey(domain string) (tld, bucket string) {
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(domain)
+	if err != nil {
+		return "_other", "exports"
+	}
+	suffix, _ := publicsuffix.PublicSuffix(domain)
+	if suffix == "" {
+		return "_other", "exports"
+	}
+	tld = suffix
+	if !largeTLD[tld] {
+		return tld, "exports"
+	}
+	sld := strings.TrimSuffix(etld1, "."+tld)
+	if len(sld) == 0 {
+		return tld, "exports"
+	}
+	c := sld[0]
+	switch {
+	case c >= 'a' && c <= 'z':
+		return tld, string([]byte{c})
+	case c >= '0' && c <= '9':
+		return tld, "0"
+	default:
+		return tld, "_other"
+	}
 }
 
 // ── k-way merge ───────────────────────────────────────────────────────────────
 
+// kMerge performs a k-way merge of pre-sorted three-column TSV files, summing
+// direct and wildcard counts for identical domain keys, and calls fn for each
+// unique domain in sorted order.
+func kMerge(inputs []string, fn func(domain string, direct, wildcard uint32) error) error {
+	h := &domainHeap{}
+	heap.Init(h)
+	for _, path := range inputs {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		item := &heapItem{file: f, scanner: bufio.NewScanner(f)}
+		item.scanner.Buffer(make([]byte, 1<<20), 1<<20)
+		if advance(item) {
+			heap.Push(h, item)
+		} else {
+			f.Close()
+		}
+	}
+
+	var curDomain string
+	var curDirect, curWild uint32
+
+	emit := func() error {
+		if curDomain == "" {
+			return nil
+		}
+		return fn(curDomain, curDirect, curWild)
+	}
+
+	for h.Len() > 0 {
+		item := heap.Pop(h).(*heapItem)
+		if item.domain != curDomain {
+			if err := emit(); err != nil {
+				return err
+			}
+			curDomain = item.domain
+			curDirect = item.direct
+			curWild = item.wildcard
+		} else {
+			curDirect += item.direct
+			curWild += item.wildcard
+		}
+		if advance(item) {
+			heap.Push(h, item)
+		}
+	}
+	return emit()
+}
+
+// kMergeToFile merges sorted chunk files into a single sorted three-column TSV.
+func kMergeToFile(chunks []string, outPath string) error {
+	f, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriterSize(f, 1<<20)
+	mergeErr := kMerge(chunks, func(domain string, direct, wildcard uint32) error {
+		_, err := fmt.Fprintf(w, "%s\t%d\t%d\n", domain, direct, wildcard)
+		return err
+	})
+	if flushErr := w.Flush(); flushErr != nil && mergeErr == nil {
+		mergeErr = flushErr
+	}
+	if closeErr := f.Close(); closeErr != nil && mergeErr == nil {
+		mergeErr = closeErr
+	}
+	if mergeErr != nil {
+		os.Remove(outPath)
+	}
+	return mergeErr
+}
+
+// ── heap types ───────────────────────────────────────────────────────────────
+
 type heapItem struct {
-	domain  string
-	count   uint32
-	scanner *bufio.Scanner
-	file    *os.File
+	domain   string
+	direct   uint32
+	wildcard uint32
+	scanner  *bufio.Scanner
+	file     *os.File
 }
 
 type domainHeap []*heapItem
@@ -215,90 +440,66 @@ func advance(item *heapItem) bool {
 		return false
 	}
 	line := item.scanner.Text()
-	tab := strings.LastIndexByte(line, '\t')
-	if tab < 0 {
+	// Format: domain\tdirect\twildcard
+	t1 := strings.IndexByte(line, '\t')
+	if t1 < 0 {
 		return false
 	}
-	item.domain = line[:tab]
-	n, _ := strconv.ParseUint(line[tab+1:], 10, 32)
-	item.count = uint32(n)
+	rest := line[t1+1:]
+	t2 := strings.IndexByte(rest, '\t')
+	if t2 < 0 {
+		return false
+	}
+	item.domain = line[:t1]
+	d, _ := strconv.ParseUint(rest[:t2], 10, 32)
+	item.direct = uint32(d)
+	w, _ := strconv.ParseUint(rest[t2+1:], 10, 32)
+	item.wildcard = uint32(w)
 	return true
 }
 
-func mergeChunks(chunks []string, uniqueOut, countAlpha string) (int64, error) {
-	h := &domainHeap{}
-	heap.Init(h)
-	for _, path := range chunks {
-		f, err := os.Open(path)
-		if err != nil {
-			return 0, err
-		}
-		item := &heapItem{file: f, scanner: bufio.NewScanner(f)}
-		item.scanner.Buffer(make([]byte, 1<<20), 1<<20)
-		if advance(item) {
-			heap.Push(h, item)
-		} else {
-			f.Close()
-		}
-	}
+// ── chunk I/O ────────────────────────────────────────────────────────────────
 
-	uf, err := os.Create(uniqueOut)
+// writeSortedChunk sorts domain keys and writes domain\tdirect\twildcard lines.
+func writeSortedChunk(counts map[string]uint64, path string) error {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	f, err := os.Create(path)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	defer uf.Close()
-	uw := bufio.NewWriterSize(uf, 1<<20)
-
-	cf, err := os.Create(countAlpha)
-	if err != nil {
-		return 0, err
+	w := bufio.NewWriterSize(f, 1<<20)
+	for _, k := range keys {
+		v := counts[k]
+		fmt.Fprintf(w, "%s\t%d\t%d\n", k, directCount(v), wildcardCount(v))
 	}
-	defer cf.Close()
-	cw := bufio.NewWriterSize(cf, 1<<20)
-
-	var n int64
-	var curDomain string
-	var curCount uint32
-
-	emit := func() {
-		if curDomain == "" {
-			return
-		}
-		uw.WriteString(curDomain)
-		uw.WriteByte('\n')
-		fmt.Fprintf(cw, "%d\t%s\n", curCount, curDomain)
-		n++
+	if err := w.Flush(); err != nil {
+		f.Close()
+		return err
 	}
-
-	for h.Len() > 0 {
-		item := heap.Pop(h).(*heapItem)
-		if item.domain != curDomain {
-			emit()
-			curDomain = item.domain
-			curCount = item.count
-		} else {
-			curCount += item.count
-		}
-		if advance(item) {
-			heap.Push(h, item)
-		}
-	}
-	emit()
-
-	if err := uw.Flush(); err != nil {
-		return 0, err
-	}
-	return n, cw.Flush()
+	return f.Close()
 }
 
-// normalize lowercases, strips leading "*.", and validates the domain.
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+func removeFiles(paths []string) {
+	for _, p := range paths {
+		os.Remove(p)
+	}
+}
+
+// normalize lowercases and validates a domain string. The caller must strip
+// any leading "*." before calling — wildcard handling is the caller's responsibility.
 func normalize(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
 	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "*.")
 	dot := false
 	for _, c := range s {
 		switch {
