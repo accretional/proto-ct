@@ -4,10 +4,23 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"log"
 	"os"
+	"path/filepath"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
+
+// certMonth returns the "YYYY-MM" partition key for a not_before string.
+// Falls back to "unknown" for missing or malformed values.
+func certMonth(notBefore string) string {
+	if len(notBefore) >= 7 {
+		return notBefore[:7]
+	}
+	return "unknown"
+}
 
 // IssuerDB manages the issuers SQLite database.
 type IssuerDB struct {
@@ -361,3 +374,146 @@ func (sdb *SubjectDB) CheckpointAndClose() error {
 
 // Close closes the database.
 func (sdb *SubjectDB) Close() error { return sdb.db.Close() }
+
+// ── SubjectDBPool ─────────────────────────────────────────────────────────────
+
+// SubjectDBPool manages per-cert-issuance-month SubjectDB handles within a
+// single ingestion session. Each month's DB lives at activeDir/YYYY-MM/subjects.db.
+// FlushAll checkpoints every open DB and merges it into the archive, keeping
+// each partition unfragmented via the build-on-new-file MergeSubjectDBs pattern.
+type SubjectDBPool struct {
+	mu        sync.Mutex
+	dbs       map[string]*SubjectDB
+	activeDir string // e.g. data/active/20260519/
+}
+
+// NewSubjectDBPool creates an empty pool rooted at activeDir.
+func NewSubjectDBPool(activeDir string) *SubjectDBPool {
+	return &SubjectDBPool{
+		dbs:       make(map[string]*SubjectDB),
+		activeDir: activeDir,
+	}
+}
+
+// GetOrOpen returns the SubjectDB for the given month, opening it lazily.
+func (p *SubjectDBPool) GetOrOpen(month string) (*SubjectDB, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if sdb, ok := p.dbs[month]; ok {
+		return sdb, nil
+	}
+	dir := filepath.Join(p.activeDir, month)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("pool mkdir %s: %w", dir, err)
+	}
+	sdb, err := OpenSubjectDB(filepath.Join(dir, "subjects.db"))
+	if err != nil {
+		return nil, err
+	}
+	p.dbs[month] = sdb
+	return sdb, nil
+}
+
+// InsertBatch groups subjects by cert issuance month and inserts each group
+// into the appropriate monthly DB, opening it lazily.
+func (p *SubjectDBPool) InsertBatch(subjects []Subject) error {
+	byMonth := make(map[string][]Subject, 4)
+	for _, s := range subjects {
+		m := certMonth(s.NotBefore)
+		byMonth[m] = append(byMonth[m], s)
+	}
+	for month, batch := range byMonth {
+		sdb, err := p.GetOrOpen(month)
+		if err != nil {
+			return err
+		}
+		if err := sdb.InsertSubjectBatch(batch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FlushAll checkpoints and closes every open DB, merges each into
+// archiveRoot/YYYY-MM/subjects.db (creating the partition if new), builds
+// query indexes on the archive copy, and removes the active subdir.
+// All months are attempted regardless of individual errors; the first error
+// encountered is returned.
+func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var firstErr error
+	for month, sdb := range p.dbs {
+		if err := sdb.CheckpointAndClose(); err != nil {
+			log.Printf("pool: checkpoint %s: %v", month, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		activePath := filepath.Join(p.activeDir, month, "subjects.db")
+		archivePath := filepath.Join(archiveRoot, month, "subjects.db")
+		if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		var mergeErr error
+		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+			// First flush for this month: copy straight across (avoids ATTACH
+			// on a non-existent file that MergeSubjectDBs would reject).
+			mergeErr = copySubjectDB(activePath, archivePath)
+		} else {
+			mergeErr = MergeSubjectDBs(activePath, archivePath)
+		}
+		if mergeErr != nil {
+			log.Printf("pool: flush %s: %v", month, mergeErr)
+			if firstErr == nil {
+				firstErr = mergeErr
+			}
+			continue
+		}
+
+		if err := BuildQueryIndexes(archivePath); err != nil {
+			log.Printf("pool: build indexes %s: %v", month, err) // non-fatal
+		}
+		if err := os.RemoveAll(filepath.Join(p.activeDir, month)); err != nil {
+			log.Printf("pool: remove active %s: %v", month, err)
+		}
+	}
+	p.dbs = make(map[string]*SubjectDB)
+	return firstErr
+}
+
+// CloseAll closes all open DBs without merging. Used on error paths where the
+// active data will be re-ingested on the next session.
+func (p *SubjectDBPool) CloseAll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, sdb := range p.dbs {
+		sdb.Close()
+	}
+	p.dbs = make(map[string]*SubjectDB)
+}
+
+// copySubjectDB copies a checkpointed subjects.db from src to dst using a
+// streaming file copy. Used when an archive partition doesn't exist yet.
+func copySubjectDB(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}

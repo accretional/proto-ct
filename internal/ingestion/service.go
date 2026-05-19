@@ -5,7 +5,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
 	"os"
@@ -168,22 +167,18 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 	globalProcessed := run.TotalProcessed
 	tileIdx := run.NextTileIdx
 
-	// Dated run directory lives in activeDir (SSD). Rotates at local midnight.
-	currentDate := time.Now().Local().Format("20060102")
-	runDir := filepath.Join(activeDir, currentDate)
-	issuerDB, subjectDB, err := openDatedDBs(runDir)
+	// Global issuers.db lives at the archive root — one file for all partitions.
+	issuerDB, err := db.OpenIssuerDB(filepath.Join(archiveDir, "issuers.db"))
 	if err != nil {
-		return status.Errorf(codes.Internal, "open dated dbs: %v", err)
+		return status.Errorf(codes.Internal, "open global issuers db: %v", err)
 	}
+
+	// Per-session pool: routes each cert to its YYYY-MM monthly partition.
+	currentDate := time.Now().Local().Format("20060102")
+	pool := db.NewSubjectDBPool(filepath.Join(activeDir, currentDate))
 
 	continuous := req.BatchSize == 0
 	totalTarget := int(req.BatchSize)
-
-	const defaultSizeRollover = 50 * 1024 * 1024 * 1024 // 50 GiB
-	sizeRolloverBytes := req.SizeRolloverBytes
-	if sizeRolloverBytes == 0 {
-		sizeRolloverBytes = defaultSizeRollover
-	}
 
 	// Sliding-window prefetch: keep tileFetchLookahead tile fetches in flight
 	// at all times so HTTP latency is hidden behind write time.
@@ -209,27 +204,20 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 
 	for continuous || sessionProcessed < totalTarget {
 		if err := ctx.Err(); err != nil {
+			pool.CloseAll()
 			issuerDB.Close()
-			subjectDB.Close()
 			return status.FromContextError(err).Err()
 		}
 
-		// Daily cutover: checkpoint+close old DBs, archive them, open new day on SSD.
+		// Daily flush: archive all open monthly partitions, open a fresh pool for
+		// the new session date. The global issuerDB stays open across rollovers.
 		if today := time.Now().Local().Format("20060102"); today != currentDate {
-			log.Printf("date rollover %s → %s: archiving and rotating databases", currentDate, today)
-			issuerDB.CheckpointAndClose()
-			subjectDB.CheckpointAndClose()
-			// Copy completed dated dir from SSD to archive in background.
-			completedActive := filepath.Join(activeDir, currentDate)
-			completedArchive := filepath.Join(archiveDir, currentDate)
-			go archiveDateDir(completedActive, completedArchive)
-			currentDate = today
-			runDir = filepath.Join(activeDir, currentDate)
-			issuerDB, subjectDB, err = openDatedDBs(runDir)
-			if err != nil {
-				return status.Errorf(codes.Internal, "open rotated dbs: %v", err)
+			log.Printf("date rollover %s → %s: flushing pool to archive", currentDate, today)
+			if err := pool.FlushAll(archiveDir); err != nil {
+				log.Printf("warn: flush pool on rollover: %v", err)
 			}
-			clear(issuerCache) // ca_ids restart in the new issuerDB
+			currentDate = today
+			pool = db.NewSubjectDBPool(filepath.Join(activeDir, currentDate))
 		}
 
 		// Wait for the next tile from the prefetch window.
@@ -245,16 +233,14 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 		if result.err != nil {
 			if continuous && ctlog.IsNotFound(result.err) {
 				log.Printf("caught up at tile %d (total mirrored: %d)", tileIdx, globalProcessed)
+				if err := pool.FlushAll(archiveDir); err != nil {
+					log.Printf("warn: flush pool on caught-up: %v", err)
+				}
 				issuerDB.CheckpointAndClose()
-				subjectDB.CheckpointAndClose()
-				go archiveDateDir(
-					filepath.Join(activeDir, currentDate),
-					filepath.Join(archiveDir, currentDate),
-				)
 				return nil
 			}
+			pool.CloseAll()
 			issuerDB.Close()
-			subjectDB.Close()
 			return status.Errorf(codes.Internal, "fetch tile %d: %v", tileIdx, result.err)
 		}
 		if len(result.leaves) == 0 {
@@ -291,13 +277,13 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 		}
 
 		if len(batch) > 0 {
-			if err := subjectDB.InsertSubjectBatch(batch); err != nil {
+			if err := pool.InsertBatch(batch); err != nil {
 				log.Printf("warn: insert batch tile %d: %v", tileIdx, err)
 			}
 			for _, rec := range recs {
 				if err := stream.Send(rec); err != nil {
+					pool.CloseAll()
 					issuerDB.Close()
-					subjectDB.Close()
 					return err
 				}
 			}
@@ -309,20 +295,12 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 
 		tileIdx++
 
-		// Size-based rollover: check every 500 tiles to keep stat overhead low.
-		if tileIdx%500 == 0 {
-			subjectsPath := filepath.Join(activeDir, currentDate, "subjects.db")
-			if dbSizeBytes(subjectsPath) >= sizeRolloverBytes {
-				issuerDB, subjectDB, err = sizeRollover(activeDir, archiveDir, currentDate, issuerDB, subjectDB, issuerCache)
-				if err != nil {
-					return status.Errorf(codes.Internal, "size rollover: %v", err)
-				}
-			}
-		}
 	}
 
-	issuerDB.Close()
-	subjectDB.Close()
+	if err := pool.FlushAll(archiveDir); err != nil {
+		log.Printf("warn: flush pool at session end: %v", err)
+	}
+	issuerDB.CheckpointAndClose()
 	log.Printf("ingestion complete: session=%d total=%d", sessionProcessed, globalProcessed)
 	return nil
 }
@@ -355,150 +333,6 @@ func (s *Service) metricsLoop(ctx context.Context, activeDir, archiveDir, root s
 	}
 }
 
-// openDatedDBs creates the dated directory and opens both SQLite files.
-func openDatedDBs(runDir string) (*db.IssuerDB, *db.SubjectDB, error) {
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("mkdir %s: %w", runDir, err)
-	}
-	issuerDB, err := db.OpenIssuerDB(filepath.Join(runDir, "issuers.db"))
-	if err != nil {
-		return nil, nil, err
-	}
-	subjectDB, err := db.OpenSubjectDB(filepath.Join(runDir, "subjects.db"))
-	if err != nil {
-		issuerDB.Close()
-		return nil, nil, err
-	}
-	return issuerDB, subjectDB, nil
-}
-
-// ── archiveDateDir / sizeRollover ────────────────────────────────────────────
-
-// archiveDateDir is called at midnight in a background goroutine. It merges or
-// copies the completed SSD dated dir into the archive drive, builds query
-// indexes on the final archive copy, then removes the SSD copy.
-func archiveDateDir(src, dst string) {
-	if err := mergeOrCopy(src, dst); err != nil {
-		log.Printf("archive: %v", err)
-		return
-	}
-	// Build query indexes on the archive copy (HDD) after all data is there.
-	archiveSubjects := filepath.Join(dst, "subjects.db")
-	log.Printf("archive: building query indexes on %s", archiveSubjects)
-	if err := db.BuildQueryIndexes(archiveSubjects); err != nil {
-		log.Printf("archive: build indexes: %v", err) // non-fatal
-	}
-	if err := os.RemoveAll(src); err != nil {
-		log.Printf("archive: remove %s: %v", src, err)
-		return
-	}
-	log.Printf("archive: %s complete", dst)
-}
-
-// sizeRollover is called synchronously when the active subjects.db exceeds the
-// size threshold. It checkpoints, archives or merges into the archive drive,
-// deletes the SSD copy, and opens fresh databases. Ingestion is paused while
-// this runs. Returns the new open DB handles.
-func sizeRollover(
-	activeDir, archiveDir, currentDate string,
-	issuerDB *db.IssuerDB,
-	subjectDB *db.SubjectDB,
-	issuerCache map[[32]byte]*issuerInfo,
-) (*db.IssuerDB, *db.SubjectDB, error) {
-	activeDateDir := filepath.Join(activeDir, currentDate)
-	log.Printf("size rollover: subjects.db exceeded threshold, archiving %s", activeDateDir)
-
-	issuerDB.CheckpointAndClose()
-	subjectDB.CheckpointAndClose()
-
-	archiveDateDirPath := filepath.Join(archiveDir, currentDate)
-	if err := mergeOrCopy(activeDateDir, archiveDateDirPath); err != nil {
-		// Archive failed — reopen the same dir and keep going.
-		log.Printf("size rollover: archive failed (%v), continuing in same active dir", err)
-		idb, sdb, reopenErr := openDatedDBs(activeDateDir)
-		if reopenErr != nil {
-			return nil, nil, fmt.Errorf("size rollover archive failed and reopen failed: %v / %v", err, reopenErr)
-		}
-		return idb, sdb, nil
-	}
-
-	if err := os.RemoveAll(activeDateDir); err != nil {
-		log.Printf("size rollover: cleanup %s: %v", activeDateDir, err)
-	}
-
-	idb, sdb, err := openDatedDBs(activeDateDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open fresh dbs after size rollover: %w", err)
-	}
-	clear(issuerCache)
-	log.Printf("size rollover: complete, fresh active db opened")
-	return idb, sdb, nil
-}
-
-// mergeOrCopy copies src into dst. If dst already has a subjects.db (from a
-// prior size rollover), the rows are merged using INSERT OR IGNORE with explicit
-// column lists to avoid autoincrement id collisions.
-func mergeOrCopy(src, dst string) error {
-	if _, err := os.Stat(filepath.Join(dst, "subjects.db")); err == nil {
-		log.Printf("archive: merging %s into existing %s", src, dst)
-		if err := db.MergeIssuerDBs(
-			filepath.Join(src, "issuers.db"),
-			filepath.Join(dst, "issuers.db"),
-		); err != nil {
-			return fmt.Errorf("merge issuers %s → %s: %w", src, dst, err)
-		}
-		return db.MergeSubjectDBs(
-			filepath.Join(src, "subjects.db"),
-			filepath.Join(dst, "subjects.db"),
-		)
-	}
-	return copyDir(src, dst)
-}
-
-// dbSizeBytes returns the on-disk size of a SQLite database including its WAL.
-func dbSizeBytes(path string) int64 {
-	var total int64
-	for _, p := range []string{path, path + "-wal"} {
-		if fi, err := os.Stat(p); err == nil {
-			total += fi.Size()
-		}
-	}
-	return total
-}
-
-// copyDir copies all regular files from src to dst, creating dst if needed.
-func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(src, path)
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		return copyFile(path, target)
-	})
-}
-
-// copyFile copies a single file, creating the destination directory if needed.
-func copyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
-}
 
 // ── prefetchIssuers ──────────────────────────────────────────────────────────
 
