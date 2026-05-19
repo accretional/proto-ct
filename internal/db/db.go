@@ -434,9 +434,23 @@ func (p *SubjectDBPool) InsertBatch(subjects []Subject) error {
 	return nil
 }
 
-// FlushAll checkpoints and closes every open DB, merges each into
-// archiveRoot/YYYY-MM/subjects.db (creating the partition if new), builds
-// query indexes on the archive copy, and removes the active subdir.
+// incrementalMergeThreshold is the active DB size below which FlushAll uses a
+// direct INSERT OR IGNORE into the archive rather than a full rebuild. For
+// live incremental ingestion (small active DBs), direct insert is fast and
+// causes negligible B-tree fragmentation. For historical bulk ingestion (large
+// active DBs), MergeSubjectDBs rebuilds the archive from scratch to keep pages
+// contiguous and avoid read-path degradation.
+const incrementalMergeThreshold = 256 << 20 // 256 MiB
+
+// FlushAll checkpoints and closes every open DB, then merges each into
+// archiveRoot/YYYY-MM/subjects.db using the most appropriate strategy:
+//
+//   - Archive doesn't exist: copy active file across, build query indexes.
+//   - Active < 256 MiB:      INSERT OR IGNORE directly into archive (fast,
+//                             minimal fragmentation for small incremental batches).
+//   - Active >= 256 MiB:     full rebuild via MergeSubjectDBs (prevents B-tree
+//                             fragmentation after large bulk ingestion runs).
+//
 // All months are attempted regardless of individual errors; the first error
 // encountered is returned.
 func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
@@ -461,12 +475,28 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 		}
 
 		var mergeErr error
-		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
-			// First flush for this month: copy straight across (avoids ATTACH
-			// on a non-existent file that MergeSubjectDBs would reject).
+		if _, statErr := os.Stat(archivePath); os.IsNotExist(statErr) {
+			// New partition: copy file and build all query indexes.
 			mergeErr = copySubjectDB(activePath, archivePath)
+			if mergeErr == nil {
+				if err := BuildQueryIndexes(archivePath); err != nil {
+					log.Printf("pool: build indexes %s: %v", month, err)
+				}
+			}
 		} else {
-			mergeErr = MergeSubjectDBs(activePath, archivePath)
+			fi, _ := os.Stat(activePath)
+			if fi != nil && fi.Size() < incrementalMergeThreshold {
+				// Small incremental batch: insert directly, no rebuild.
+				mergeErr = mergeSubjectDBsDirect(activePath, archivePath)
+			} else {
+				// Large bulk flush: rebuild from scratch to prevent fragmentation.
+				mergeErr = MergeSubjectDBs(activePath, archivePath)
+				if mergeErr == nil {
+					if err := BuildQueryIndexes(archivePath); err != nil {
+						log.Printf("pool: build indexes %s: %v", month, err)
+					}
+				}
+			}
 		}
 		if mergeErr != nil {
 			log.Printf("pool: flush %s: %v", month, mergeErr)
@@ -476,15 +506,35 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 			continue
 		}
 
-		if err := BuildQueryIndexes(archivePath); err != nil {
-			log.Printf("pool: build indexes %s: %v", month, err) // non-fatal
-		}
 		if err := os.RemoveAll(filepath.Join(p.activeDir, month)); err != nil {
 			log.Printf("pool: remove active %s: %v", month, err)
 		}
 	}
 	p.dbs = make(map[string]*SubjectDB)
 	return firstErr
+}
+
+// mergeSubjectDBsDirect inserts all rows from srcPath into dstPath using
+// INSERT OR IGNORE, skipping duplicates on (tile_idx, entry_idx). Used for
+// small incremental flushes where a full rebuild would be disproportionately
+// expensive.
+func mergeSubjectDBsDirect(srcPath, dstPath string) error {
+	dst, err := sql.Open("sqlite", dstPath)
+	if err != nil {
+		return fmt.Errorf("open dst for direct merge: %w", err)
+	}
+	defer dst.Close()
+	dst.SetMaxOpenConns(1)
+	dst.Exec(`PRAGMA synchronous=OFF; PRAGMA cache_size=-524288;`) //nolint:errcheck
+	if _, err := dst.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
+		return fmt.Errorf("attach src for direct merge: %w", err)
+	}
+	if _, err := dst.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
+		SELECT ` + subjectCols + ` FROM src.subjects`); err != nil {
+		return fmt.Errorf("direct merge insert: %w", err)
+	}
+	_, err = dst.Exec(`DETACH src`)
+	return err
 }
 
 // CloseAll closes all open DBs without merging. Used on error paths where the
