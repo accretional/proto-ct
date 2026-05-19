@@ -16,4 +16,13 @@ echo "✓ bin/ct-server"
 go build -o bin/ct-client ./cmd/client
 echo "✓ bin/ct-client"
 
+go build -o bin/ct-export ./cmd/export
+echo "✓ bin/ct-export"
+
+go build -o bin/ct-repartition ./cmd/repartition
+echo "✓ bin/ct-repartition"
+
+go build -o bin/dnsfetch ./cmd/dnsfetch
+echo "✓ bin/dnsfetch"
+
 echo "Build complete."
