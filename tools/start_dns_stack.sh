@@ -32,7 +32,7 @@ ensure_unbound() {
 
 ensure_proto_domain() {
   local addr="${PROTO_DOMAIN_ADDR:-:50098}"
-  if pgrep -f "proto-domain/bin/server" >/dev/null; then
+  if pgrep -f "bin/server .*--upstream" >/dev/null; then
     log "proto-domain server already running"
     return
   fi
@@ -43,7 +43,7 @@ ensure_proto_domain() {
   log "starting proto-domain server --upstream=127.0.0.1:5353"
   (cd "$PROTO_DOMAIN" && ./bin/server --upstream=127.0.0.1:5353 >/tmp/proto-domain-server.log 2>&1 &)
   sleep 2
-  if ! pgrep -f "proto-domain/bin/server" >/dev/null; then
+  if ! pgrep -f "bin/server .*--upstream" >/dev/null; then
     log "ERROR: proto-domain server failed to start (see /tmp/proto-domain-server.log)"
     exit 1
   fi
