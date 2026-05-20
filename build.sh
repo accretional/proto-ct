@@ -16,4 +16,7 @@ echo "✓ bin/ct-server"
 go build -o bin/ct-client ./cmd/client
 echo "✓ bin/ct-client"
 
+go build -o bin/monitor ./cmd/monitor
+echo "✓ bin/monitor"
+
 echo "Build complete."
