@@ -19,11 +19,12 @@ import (
 )
 
 var (
-	flagShards   = flag.String("shards", "", "input shards directory (required)")
-	flagOut      = flag.String("out", "", "output directory for DNS databases (required)")
+	flagShards   = flag.String("shards", "data/shards", "input shards directory")
+	flagStaging  = flag.String("staging", "data/dns-staging", "staging directory for in-progress DB writes")
+	flagOut      = flag.String("out", "data/dns", "output directory for completed DNS databases")
 	flagAddr     = flag.String("addr", "localhost:50098", "proto-domain gRPC address")
 	flagWorkers  = flag.Int("workers", 50, "concurrent domain resolver workers")
-	flagQPS      = flag.Float64("qps", 50.0, "max domains/sec (each domain triggers ~16 DNS queries)")
+	flagQPS      = flag.Float64("qps", 50.0, "max domains/sec (each domain triggers ~11 DNS queries)")
 	flagTimeout  = flag.Duration("timeout", 8*time.Second, "per-domain resolution timeout")
 	flagMaxRdata = flag.Int("max-rdata", 2048, "max bytes to store per resource record value")
 )
@@ -84,11 +85,6 @@ func (s *runStats) record(status string) {
 
 func main() {
 	flag.Parse()
-	if *flagShards == "" || *flagOut == "" {
-		fmt.Fprintln(os.Stderr, "usage: dnsfetch --shards <dir> --out <dir> [flags]")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
 
 	conn, err := grpc.NewClient(*flagAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -121,11 +117,13 @@ func main() {
 		cancel()
 	}()
 
+	pool := newDBPool(*flagStaging, *flagMaxRdata)
+
 	var writerWg sync.WaitGroup
 	writerWg.Add(1)
 	go func() {
 		defer writerWg.Done()
-		runWriter(resultCh, *flagOut, *flagMaxRdata)
+		runWriter(resultCh, pool)
 	}()
 
 	var workerWg sync.WaitGroup
@@ -158,8 +156,9 @@ func main() {
 		}
 	}()
 
-	if err := runFeeder(ctx, shards, *flagOut, workCh); err != nil && ctx.Err() == nil {
-		log.Printf("feeder: %v", err)
+	feederErr := runFeeder(ctx, shards, *flagStaging, *flagOut, workCh)
+	if feederErr != nil && ctx.Err() == nil {
+		log.Printf("feeder: %v", feederErr)
 	}
 	close(workCh)
 
@@ -170,4 +169,17 @@ func main() {
 	done := st.done.Load()
 	log.Printf("complete: total=%d ok=%d nxdomain=%d timeout=%d error=%d",
 		done, st.ok.Load(), st.nxd.Load(), st.timeouts.Load(), st.errs.Load())
+
+	// On clean completion, move staged DBs to the output directory.
+	// On interrupt, just close handles and leave staging intact for resume.
+	if feederErr == nil && ctx.Err() == nil {
+		if err := pool.finalizeAll(*flagOut); err != nil {
+			log.Printf("finalize: %v", err)
+		} else {
+			log.Printf("finalized: staged DBs moved to %s", *flagOut)
+		}
+	} else {
+		pool.closeAll()
+		fmt.Fprintf(os.Stderr, "interrupted: staged DBs left in %s for resume\n", *flagStaging)
+	}
 }

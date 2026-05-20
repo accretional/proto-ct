@@ -83,13 +83,19 @@ func loadSkipSet(dbPath string) map[string]struct{} {
 
 // runFeeder reads all shard TSV files, skips already-resolved domains, and
 // pushes work items to workCh in the order shards were shuffled.
-func runFeeder(ctx context.Context, shards []shardEntry, outDir string, workCh chan<- workItem) error {
+// stagingDir is checked first for in-progress DBs; finalDir for completed ones.
+func runFeeder(ctx context.Context, shards []shardEntry, stagingDir, finalDir string, workCh chan<- workItem) error {
 	for _, shard := range shards {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		dbPath := filepath.Join(outDir, shard.key.tld, shard.key.bucket+".db")
-		skip := loadSkipSet(dbPath)
+		name := dbName(shard.key.bucket)
+		stagingDB := filepath.Join(stagingDir, shard.key.tld, name)
+		finalDB := filepath.Join(finalDir, shard.key.tld, name)
+		skip := loadSkipSet(stagingDB)
+		if len(skip) == 0 {
+			skip = loadSkipSet(finalDB)
+		}
 
 		f, err := os.Open(shard.path)
 		if err != nil {
