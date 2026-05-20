@@ -28,6 +28,7 @@ var (
 	flagQPS      = flag.Float64("qps", 50.0, "max domains/sec (each domain triggers ~11 DNS queries)")
 	flagTimeout  = flag.Duration("timeout", 8*time.Second, "per-domain resolution timeout")
 	flagMaxRdata = flag.Int("max-rdata", 2048, "max bytes to store per resource record value")
+	flagMetrics  = flag.Duration("metrics-interval", 60*time.Second, "how often to log throughput metrics")
 )
 
 // ── shared types ─────────────────────────────────────────────────────────────
@@ -137,7 +138,7 @@ func main() {
 	}
 
 	go func() {
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(*flagMetrics)
 		defer ticker.Stop()
 		start := time.Now()
 		for {
