@@ -19,8 +19,9 @@ type shardEntry struct {
 }
 
 // enumShards walks shardsDir, collects all *.tsv files as shardEntry values,
-// and shuffles them for cross-TLD interleaving.
-func enumShards(shardsDir string) ([]shardEntry, error) {
+// and shuffles them for cross-TLD interleaving. If onlyShard is non-empty
+// (e.g. "gov/exports" or "com/q") only the matching shard is returned.
+func enumShards(shardsDir, onlyShard string) ([]shardEntry, error) {
 	var entries []shardEntry
 	err := filepath.WalkDir(shardsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(path) != ".tsv" {
@@ -31,10 +32,11 @@ func enumShards(shardsDir string) ([]shardEntry, error) {
 		if len(parts) != 2 {
 			return nil
 		}
-		entries = append(entries, shardEntry{
-			path: path,
-			key:  shardKey{tld: parts[0], bucket: strings.TrimSuffix(parts[1], ".tsv")},
-		})
+		key := shardKey{tld: parts[0], bucket: strings.TrimSuffix(parts[1], ".tsv")}
+		if onlyShard != "" && key.String() != onlyShard {
+			return nil
+		}
+		entries = append(entries, shardEntry{path: path, key: key})
 		return nil
 	})
 	if err != nil {

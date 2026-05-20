@@ -20,6 +20,7 @@ import (
 
 var (
 	flagShards   = flag.String("shards", "data/shards", "input shards directory")
+	flagShard    = flag.String("shard", "", "process only this shard key, e.g. gov/exports or com/q (default: all)")
 	flagStaging  = flag.String("staging", "data/dns-staging", "staging directory for in-progress DB writes")
 	flagOut      = flag.String("out", "data/dns", "output directory for completed DNS databases")
 	flagAddr     = flag.String("addr", "localhost:50098", "proto-domain gRPC address")
@@ -93,7 +94,7 @@ func main() {
 	defer conn.Close()
 	client := domainpb.NewResolverClient(conn)
 
-	shards, err := enumShards(*flagShards)
+	shards, err := enumShards(*flagShards, *flagShard)
 	if err != nil {
 		log.Fatalf("enumerate shards: %v", err)
 	}

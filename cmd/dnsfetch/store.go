@@ -223,10 +223,16 @@ func (p *dbPool) finalizeAll(finalDir string) error {
 			}
 			continue
 		}
+		// Checkpoint WAL into the main db file before moving, so no
+		// orphaned -wal/-shm files are left behind when we rename.
+		e.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 		e.db.Close()
 		delete(p.entries, k)
 
 		src := p.stagingPath(k)
+		// Remove empty WAL/shm files left after checkpoint.
+		os.Remove(src + "-wal")
+		os.Remove(src + "-shm")
 		dst := filepath.Join(finalDir, k.tld, dbName(k.bucket))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			log.Printf("finalize mkdir %s: %v", dst, err)
