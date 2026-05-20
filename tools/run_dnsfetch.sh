@@ -2,6 +2,10 @@
 # Sequentially fetches DNS records for each shard in ascending size order.
 # Reads TSVs from HDD, stages writes on SSD, finalizes DBs to HDD_DNS.
 # Resume-safe: skips shards whose final DB already exists.
+#
+# Depends on the local DNS stack (unbound + proto-domain server). The
+# script auto-starts both via tools/start_dns_stack.sh — opt out with
+# SKIP_STACK=1 if you're managing them externally.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,10 +14,11 @@ DNSFETCH="$REPO/bin/dnsfetch"
 HDD_SHARDS="${HDD_SHARDS:-/Volumes/wd_office_2/datasets/CT-old/export_v2/shards}"
 HDD_DNS="${HDD_DNS:-/Volumes/wd_office_2/datasets/dns}"
 STAGING="${STAGING:-$REPO/data/dns-staging}"
-WORKERS="${WORKERS:-100}"
-QPS="${QPS:-100}"
+WORKERS="${WORKERS:-200}"
+QPS="${QPS:-500}"
 TIMEOUT="${TIMEOUT:-8s}"
 START_FROM="${START_FROM:-}"  # skip shards before this label
+SKIP_STACK="${SKIP_STACK:-}"  # set to 1 to skip auto-bringup of unbound + proto-domain
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
@@ -66,6 +71,11 @@ SHARDS=(
 )
 
 mkdir -p "$HDD_DNS" "$REPO/data/logs"
+
+if [ -z "$SKIP_STACK" ]; then
+  bash "$REPO/tools/start_dns_stack.sh"
+fi
+
 started=false
 
 for shard in "${SHARDS[@]}"; do
