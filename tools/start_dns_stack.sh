@@ -31,9 +31,12 @@ ensure_unbound() {
 }
 
 ensure_proto_domain() {
-  local addr="${PROTO_DOMAIN_ADDR:-:50098}"
-  if pgrep -f "bin/server .*--upstream" >/dev/null; then
-    log "proto-domain server already running"
+  # Liveness is "port 50098 accepts a TCP connection," not "a matching
+  # process exists." A graceful-shutdown of an old server can keep its
+  # cmdline visible to pgrep for several seconds after it has stopped
+  # listening — a positive port check avoids that race.
+  if (echo >/dev/tcp/127.0.0.1/50098) >/dev/null 2>&1; then
+    log "proto-domain server already listening on :50098"
     return
   fi
   if [ ! -x "$PROTO_DOMAIN/bin/server" ]; then
@@ -42,12 +45,15 @@ ensure_proto_domain() {
   fi
   log "starting proto-domain server --upstream=127.0.0.1:5353"
   (cd "$PROTO_DOMAIN" && ./bin/server --upstream=127.0.0.1:5353 >/tmp/proto-domain-server.log 2>&1 &)
-  sleep 2
-  if ! pgrep -f "bin/server .*--upstream" >/dev/null; then
-    log "ERROR: proto-domain server failed to start (see /tmp/proto-domain-server.log)"
-    exit 1
-  fi
-  log "proto-domain server up"
+  for i in 1 2 3 4 5; do
+    sleep 1
+    if (echo >/dev/tcp/127.0.0.1/50098) >/dev/null 2>&1; then
+      log "proto-domain server up"
+      return
+    fi
+  done
+  log "ERROR: proto-domain server did not start listening on :50098 (see /tmp/proto-domain-server.log)"
+  exit 1
 }
 
 ensure_unbound
