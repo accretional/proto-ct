@@ -96,6 +96,9 @@ func runWorker(ctx context.Context, workCh <-chan workItem, resultCh chan<- resu
 				return
 			}
 			res := resolve(ctx, client, item, timeout)
+			if ctx.Err() != nil {
+				return
+			}
 			st.record(res.status)
 			cb.record(res.status == "error") // timeouts are slow servers, not abuse signals
 			select {
