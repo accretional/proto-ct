@@ -25,4 +25,7 @@ echo "✓ bin/ct-repartition"
 go build -o bin/dnsfetch ./cmd/dnsfetch
 echo "✓ bin/dnsfetch"
 
+go build -o bin/monitor ./cmd/monitor
+echo "✓ bin/monitor"
+
 echo "Build complete."
