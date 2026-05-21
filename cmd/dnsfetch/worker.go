@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benfultz/proto-ct/internal/domainpb"
+	"github.com/accretional/proto-domain/proto/domainpb"
 	"golang.org/x/time/rate"
 )
 
@@ -166,7 +166,7 @@ func doResolve(ctx context.Context, item workItem, client domainpb.ResolverClien
 		return base, true
 	}
 
-	var records []recordRow
+	var records []*domainpb.DNSRecord
 	for {
 		rec, err := stream.Recv()
 		if err == io.EOF {
@@ -180,20 +180,10 @@ func doResolve(ctx context.Context, item workItem, client domainpb.ResolverClien
 			}
 			return base, true
 		}
-		rdata := rec.GetText()
-		if rdata == "" {
-			if raw := rec.GetRaw(); len(raw) > 0 {
-				rdata = fmt.Sprintf("0x%x", raw)
-			}
-		}
-		if rdata == "" {
+		if rec.GetBody() == nil {
 			continue
 		}
-		records = append(records, recordRow{
-			recordType: rec.GetType().String(),
-			ttl:        rec.GetTtlSeconds(),
-			rdata:      rdata,
-		})
+		records = append(records, rec)
 	}
 
 	if len(records) == 0 {

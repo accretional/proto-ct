@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/benfultz/proto-ct/internal/domainpb"
+	"github.com/accretional/proto-domain/proto/domainpb"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -26,9 +26,8 @@ var (
 	flagAddr     = flag.String("addr", "localhost:50098", "proto-domain gRPC address")
 	flagWorkers  = flag.Int("workers", 50, "concurrent domain resolver workers")
 	flagQPS      = flag.Float64("qps", 50.0, "max domains/sec (each domain triggers ~11 DNS queries)")
-	flagTimeout  = flag.Duration("timeout", 8*time.Second, "per-domain resolution timeout")
-	flagMaxRdata = flag.Int("max-rdata", 2048, "max bytes to store per resource record value")
-	flagMetrics  = flag.Duration("metrics-interval", 60*time.Second, "how often to log throughput metrics")
+	flagTimeout = flag.Duration("timeout", 8*time.Second, "per-domain resolution timeout")
+	flagMetrics = flag.Duration("metrics-interval", 60*time.Second, "how often to log throughput metrics")
 )
 
 // ── shared types ─────────────────────────────────────────────────────────────
@@ -45,17 +44,11 @@ type workItem struct {
 	shard  shardKey
 }
 
-type recordRow struct {
-	recordType string
-	ttl        int32
-	rdata      string
-}
-
 type resultItem struct {
 	domain    string
 	shard     shardKey
 	status    string // ok | nxdomain | timeout | error
-	records   []recordRow
+	records   []*domainpb.DNSRecord
 	fetchedAt int64
 }
 
@@ -119,7 +112,7 @@ func main() {
 		cancel()
 	}()
 
-	pool := newDBPool(*flagStaging, *flagMaxRdata)
+	pool := newDBPool(*flagStaging)
 
 	var writerWg sync.WaitGroup
 	writerWg.Add(1)
