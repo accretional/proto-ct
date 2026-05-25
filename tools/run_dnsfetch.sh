@@ -14,7 +14,12 @@ DNSFETCH="$REPO/bin/dnsfetch"
 HDD_SHARDS="${HDD_SHARDS:-/Volumes/wd_office_2/datasets/CT-old/export_v2/shards}"
 HDD_DNS="${HDD_DNS:-/Volumes/wd_office_2/datasets/dns}"
 STAGING="${STAGING:-$REPO/data/dns-staging}"
-WORKERS="${WORKERS:-200}"
+# Bench knee for the 16-upstream public-resolver pool: workers=1200
+# gets ~232 dom/s; workers=800 gets ~189; workers=1600 was diminishing
+# returns + worse timeout%. QPS=500 dom/s is the cap; it doesn't bind
+# at workers=1200 but is a safety stop in case per-domain latency
+# unexpectedly drops.
+WORKERS="${WORKERS:-1200}"
 QPS="${QPS:-500}"
 TIMEOUT="${TIMEOUT:-8s}"
 START_FROM="${START_FROM:-}"  # skip shards before this label
