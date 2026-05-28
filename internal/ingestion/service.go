@@ -159,7 +159,7 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 			run.NextTileIdx, run.TotalProcessed)
 	}
 
-	client := ctlog.NewClient(req.MonitoringApiRoot, req.TargetQps)
+	client := ctlog.NewTileClient(req.MonitoringApiRoot, req.TargetQps)
 
 	// Per-session state.
 	issuerCache := make(map[[32]byte]*issuerInfo)
@@ -339,7 +339,7 @@ func (s *Service) metricsLoop(ctx context.Context, activeDir, archiveDir, root s
 func prefetchIssuers(
 	ctx context.Context,
 	leaves []*ctlog.TileLeaf,
-	client *ctlog.Client,
+	client *ctlog.TileClient,
 	issuerDB *db.IssuerDB,
 	cache map[[32]byte]*issuerInfo,
 ) error {

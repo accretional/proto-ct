@@ -50,6 +50,19 @@ type Subject struct {
 	EntryType    string // "x509" | "precert"
 	TileIdx      int
 	EntryIdx     int
+
+	// Multi-log fields (zero/empty for the legacy single-log path):
+	CertHash []byte // SHA-256(TBSCertificate); 32 bytes when set, nil otherwise
+	LogID    []byte // canonical log identity; 32 bytes when set, nil otherwise
+}
+
+// CertLogEntry records that a leaf with cert_hash was observed in log_id at entry_idx.
+// One subjects row + N cert_log rows represent the same cert appearing in N logs.
+type CertLogEntry struct {
+	LogID     []byte // 32 bytes
+	EntryIdx  int64  // global index within the log
+	CertHash  []byte // 32 bytes
+	SeenAt    int64  // unix epoch seconds
 }
 
 // OpenIssuerDB opens or creates the issuer database at path.
@@ -171,12 +184,36 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 		`ALTER TABLE subjects ADD COLUMN entry_type  TEXT DEFAULT 'x509'`,
 		`ALTER TABLE subjects ADD COLUMN tile_idx    INTEGER`,
 		`ALTER TABLE subjects ADD COLUMN entry_idx   INTEGER`,
+		// Multi-log additions:
+		`ALTER TABLE subjects ADD COLUMN cert_hash   BLOB`,
+		`ALTER TABLE subjects ADD COLUMN log_id      BLOB`,
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
 	}
-	// Ensure the idempotency index exists on older databases.
+	// Ensure both idempotency indexes exist on older databases.
+	// Tile-entry index stays for legacy single-log writes (with non-NULL values).
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`) //nolint:errcheck
+	// Partial unique index — only enforced when cert_hash is set. New multi-log
+	// writes populate cert_hash and leave tile/entry NULL, so the two indexes
+	// don't conflict.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_cert_hash ON subjects(cert_hash) WHERE cert_hash IS NOT NULL`) //nolint:errcheck
+
+	// Per-log provenance: tracks where each cert was seen. PK (log_id, entry_idx)
+	// makes resume idempotent — re-fetching an entry is a no-op insert.
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS cert_log (
+			log_id    BLOB    NOT NULL,
+			entry_idx INTEGER NOT NULL,
+			cert_hash BLOB    NOT NULL,
+			seen_at   INTEGER NOT NULL,
+			PRIMARY KEY (log_id, entry_idx)
+		) WITHOUT ROWID;
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create cert_log: %w", err)
+	}
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cert_log_hash ON cert_log(cert_hash)`) //nolint:errcheck
 
 	return &SubjectDB{db: db}, nil
 }
@@ -185,7 +222,8 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 // avoid autoincrement id conflicts.
 const subjectCols = `ca_id, serial_number, common_name, organization, state, country,
 	not_before, not_after, san_domains, san_ips, url,
-	is_wildcard, san_count, entry_type, tile_idx, entry_idx`
+	is_wildcard, san_count, entry_type, tile_idx, entry_idx,
+	cert_hash, log_id`
 
 // MergeSubjectDBs appends all rows from srcPath into dstPath, skipping
 // duplicates on (tile_idx, entry_idx). The id column is omitted so the
@@ -250,9 +288,12 @@ func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
 			san_count     INTEGER DEFAULT 0,
 			entry_type    TEXT    DEFAULT 'x509',
 			tile_idx      INTEGER,
-			entry_idx     INTEGER
+			entry_idx     INTEGER,
+			cert_hash     BLOB,
+			log_id        BLOB
 		);
 		CREATE UNIQUE INDEX idx_subjects_tile_entry ON subjects(tile_idx, entry_idx);
+		CREATE UNIQUE INDEX idx_subjects_cert_hash ON subjects(cert_hash) WHERE cert_hash IS NOT NULL;
 	`); err != nil {
 		return fmt.Errorf("create schema in merged db: %w", err)
 	}
@@ -348,19 +389,62 @@ func (sdb *SubjectDB) InsertSubjectBatch(subjects []Subject) error {
 		INSERT OR IGNORE INTO subjects
 			(ca_id, serial_number, common_name, organization, state, country,
 			 not_before, not_after, san_domains, san_ips, url,
-			 is_wildcard, san_count, entry_type, tile_idx, entry_idx)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+			 is_wildcard, san_count, entry_type, tile_idx, entry_idx,
+			 cert_hash, log_id)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return fmt.Errorf("prepare insert: %w", err)
 	}
 	defer stmt.Close()
 	for _, s := range subjects {
+		var certHash, logID any
+		if len(s.CertHash) > 0 {
+			certHash = s.CertHash
+		}
+		if len(s.LogID) > 0 {
+			logID = s.LogID
+		}
+		// Legacy path: when tile_idx/entry_idx are the dedup key, leave them set.
+		// Multi-log path: caller passes zero for both and a non-empty CertHash so
+		// dedup happens on the partial unique index instead.
+		var tileIdx, entryIdx any
+		if len(s.CertHash) == 0 {
+			tileIdx = s.TileIdx
+			entryIdx = s.EntryIdx
+		}
 		if _, err := stmt.Exec(
 			s.CAID, s.SerialNumber, s.CommonName, s.Organization, s.State, s.Country,
 			s.NotBefore, s.NotAfter, s.SANDomains, s.SANIPS, s.URL,
-			s.IsWildcard, s.SANCount, s.EntryType, s.TileIdx, s.EntryIdx,
+			s.IsWildcard, s.SANCount, s.EntryType, tileIdx, entryIdx,
+			certHash, logID,
 		); err != nil {
 			return fmt.Errorf("insert subject tile=%d entry=%d: %w", s.TileIdx, s.EntryIdx, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// InsertCertLogBatch records per-log provenance for a batch of (log_id, entry_idx, cert_hash)
+// observations in a single transaction. Duplicate (log_id, entry_idx) rows are silently ignored.
+func (sdb *SubjectDB) InsertCertLogBatch(entries []CertLogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := sdb.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin cert_log batch: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.Prepare(`
+		INSERT OR IGNORE INTO cert_log (log_id, entry_idx, cert_hash, seen_at)
+		VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare cert_log insert: %w", err)
+	}
+	defer stmt.Close()
+	for _, e := range entries {
+		if _, err := stmt.Exec(e.LogID, e.EntryIdx, e.CertHash, e.SeenAt); err != nil {
+			return fmt.Errorf("insert cert_log entry=%d: %w", e.EntryIdx, err)
 		}
 	}
 	return tx.Commit()

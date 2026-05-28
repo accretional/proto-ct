@@ -18,18 +18,22 @@ const (
 	retryBaseWait = 2 * time.Second
 )
 
-// Client fetches tiles from a static-ct-api log.
-type Client struct {
+// TileSize is the static-ct-api entries-per-tile constant.
+const TileSize = 256
+
+// TileClient fetches tiles from a static-ct-api log. It implements LogClient.
+type TileClient struct {
 	httpClient   *http.Client
 	tileDataRoot string
 	logRoot      string
 	limiter      *rate.Limiter // nil = unlimited
+	logID        [32]byte      // zero until SetLogID is called
 }
 
-// NewClient creates a Client from a tile/data root URL.
+// NewTileClient creates a TileClient from a tile/data root URL.
 // targetQPS controls the maximum request rate; actual rate is 80% of that.
-// Pass 0 for unlimited.
-func NewClient(tileDataRoot string, targetQPS float64) *Client {
+// Pass 0 for unlimited. LogID is left zero — call SetLogID once known.
+func NewTileClient(tileDataRoot string, targetQPS float64) *TileClient {
 	if !strings.HasSuffix(tileDataRoot, "/") {
 		tileDataRoot += "/"
 	}
@@ -47,7 +51,7 @@ func NewClient(tileDataRoot string, targetQPS float64) *Client {
 		MaxConnsPerHost:     512,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	return &Client{
+	return &TileClient{
 		httpClient:   &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		tileDataRoot: tileDataRoot,
 		logRoot:      logRoot,
@@ -55,8 +59,14 @@ func NewClient(tileDataRoot string, targetQPS float64) *Client {
 	}
 }
 
+// SetLogID records the canonical 32-byte log identity.
+func (c *TileClient) SetLogID(id [32]byte) { c.logID = id }
+
+// LogID returns the canonical 32-byte log identity (zero until SetLogID is called).
+func (c *TileClient) LogID() [32]byte { return c.logID }
+
 // TreeSize fetches and returns the current tree size from the checkpoint.
-func (c *Client) TreeSize(ctx context.Context) (int64, error) {
+func (c *TileClient) TreeSize(ctx context.Context) (int64, error) {
 	body, err := c.get(ctx, c.logRoot+"checkpoint")
 	if err != nil {
 		return 0, fmt.Errorf("checkpoint: %w", err)
@@ -73,12 +83,12 @@ func (c *Client) TreeSize(ctx context.Context) (int64, error) {
 }
 
 // TileURL returns the URL for a given tile index.
-func (c *Client) TileURL(tileIdx int) string {
+func (c *TileClient) TileURL(tileIdx int) string {
 	return c.tileDataRoot + tileIndexPath(tileIdx)
 }
 
 // FetchTile downloads tile at the given index. maxEntries limits parsing (0 = all 256).
-func (c *Client) FetchTile(ctx context.Context, tileIdx int, maxEntries int) ([]*TileLeaf, error) {
+func (c *TileClient) FetchTile(ctx context.Context, tileIdx int, maxEntries int) ([]*TileLeaf, error) {
 	data, err := c.get(ctx, c.TileURL(tileIdx))
 	if err != nil {
 		return nil, fmt.Errorf("tile %d: %w", tileIdx, err)
@@ -86,8 +96,38 @@ func (c *Client) FetchTile(ctx context.Context, tileIdx int, maxEntries int) ([]
 	return ParseTile(data, maxEntries)
 }
 
+// FetchEntries returns leaves with global indices in [start, end). It fetches
+// whichever tiles cover the range and slices to the exact bounds. start and end
+// are global entry indices, not tile indices.
+func (c *TileClient) FetchEntries(ctx context.Context, start, end int64) ([]*LogLeaf, error) {
+	if start < 0 || end < start {
+		return nil, fmt.Errorf("FetchEntries: invalid range [%d, %d)", start, end)
+	}
+	if start == end {
+		return nil, nil
+	}
+	firstTile := start / TileSize
+	lastTile := (end - 1) / TileSize
+	out := make([]*LogLeaf, 0, end-start)
+	for t := firstTile; t <= lastTile; t++ {
+		leaves, err := c.FetchTile(ctx, int(t), TileSize)
+		if err != nil {
+			return nil, err
+		}
+		base := t * TileSize
+		for i, l := range leaves {
+			idx := base + int64(i)
+			if idx < start || idx >= end {
+				continue
+			}
+			out = append(out, tileLeafToLogLeaf(l, idx))
+		}
+	}
+	return out, nil
+}
+
 // FetchIssuer downloads the DER-encoded issuer certificate for the given fingerprint.
-func (c *Client) FetchIssuer(ctx context.Context, fingerprint [32]byte) ([]byte, error) {
+func (c *TileClient) FetchIssuer(ctx context.Context, fingerprint [32]byte) ([]byte, error) {
 	hex := fmt.Sprintf("%x", fingerprint)
 	data, err := c.get(ctx, c.logRoot+"issuer/"+hex)
 	if err != nil {
@@ -96,7 +136,7 @@ func (c *Client) FetchIssuer(ctx context.Context, fingerprint [32]byte) ([]byte,
 	return data, nil
 }
 
-func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
+func (c *TileClient) get(ctx context.Context, url string) ([]byte, error) {
 	if c.limiter != nil {
 		if err := c.limiter.Wait(ctx); err != nil {
 			return nil, err
@@ -135,7 +175,7 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	return nil, fmt.Errorf("after %d attempts: %w", maxRetries+1, lastErr)
 }
 
-func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
+func (c *TileClient) doGet(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -153,6 +193,11 @@ func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
 		return nil, &httpError{code: resp.StatusCode, url: url}
 	}
 
+	return readMaybeGzip(resp)
+}
+
+// readMaybeGzip reads resp.Body, transparently decompressing if Content-Encoding is gzip.
+func readMaybeGzip(resp *http.Response) ([]byte, error) {
 	var reader io.Reader = resp.Body
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		gz, err := gzip.NewReader(resp.Body)
@@ -162,7 +207,6 @@ func (c *Client) doGet(ctx context.Context, url string) ([]byte, error) {
 		defer gz.Close()
 		reader = gz
 	}
-
 	return io.ReadAll(reader)
 }
 
