@@ -71,9 +71,14 @@ func OpenIssuerDB(path string) (*IssuerDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open issuer db: %w", err)
 	}
+	// Single writer connection — multi-log workers serialise through one
+	// connection so per-connection PRAGMAs stay in effect everywhere and
+	// concurrent inserts queue in Go instead of racing for the SQLite lock.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(`
 		PRAGMA journal_mode=WAL;
 		PRAGMA synchronous=NORMAL;
+		PRAGMA busy_timeout=10000;
 		PRAGMA cache_size=-32768;
 		PRAGMA temp_store=MEMORY;
 	`); err != nil {
@@ -129,25 +134,29 @@ func (idb *IssuerDB) Close() error { return idb.db.Close() }
 // OpenSubjectDB opens or creates the subject database at path, configured for
 // write-optimised ingestion. Query indexes (ca_id, cn, not_after, wildcard) are
 // intentionally omitted — call BuildQueryIndexes before archiving.
+//
+// Multi-writer note: PRAGMAs go in the DSN so every connection in the pool
+// inherits them (a one-off `db.Exec("PRAGMA ...")` only affects whichever
+// connection happened to run it). EXCLUSIVE locking is dropped so concurrent
+// workers in the multi-log fan-out can queue on the brief per-transaction WAL
+// writer lock instead of serialising on one Go-level connection.
 func OpenSubjectDB(path string) (*SubjectDB, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := "file:" + path +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(OFF)" +
+		"&_pragma=busy_timeout(10000)" +
+		"&_pragma=cache_size(-524288)" +
+		"&_pragma=wal_autocheckpoint(20000)" +
+		"&_pragma=temp_store(MEMORY)" +
+		"&_pragma=mmap_size(2147483648)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open subject db: %w", err)
 	}
-	// Single writer only — hold the exclusive lock for the connection lifetime.
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`
-		PRAGMA journal_mode=WAL;
-		PRAGMA synchronous=OFF;
-		PRAGMA locking_mode=EXCLUSIVE;
-		PRAGMA cache_size=-524288;
-		PRAGMA wal_autocheckpoint=20000;
-		PRAGMA temp_store=MEMORY;
-		PRAGMA mmap_size=2147483648;
-	`); err != nil {
-		db.Close()
-		return nil, err
-	}
+	// Allow concurrent writer connections; SQLite's WAL writer lock still
+	// serialises the actual transactions, but contention is brief per-tx
+	// rather than per-connection-lifetime.
+	db.SetMaxOpenConns(8)
 
 	// Base table (created fresh or already exists).
 	if _, err := db.Exec(`

@@ -475,6 +475,10 @@ type IngestAllRequest struct {
 	Protocols []string `protobuf:"bytes,2,rep,name=protocols,proto3" json:"protocols,omitempty"`
 	// Filter by operator name. Empty = all operators.
 	Operators []string `protobuf:"bytes,3,rep,name=operators,proto3" json:"operators,omitempty"`
+	// Exclude these operators from the ingest. Applied AFTER the operators
+	// filter. Useful for skipping operators whose rate limits make them not
+	// worth the effort (e.g. Geomys at 1 QPS aggregate).
+	ExcludedOperators []string `protobuf:"bytes,10,rep,name=excluded_operators,json=excludedOperators,proto3" json:"excluded_operators,omitempty"`
 	// Optional substring match on log description (e.g. "2026h1"). Empty = no filter.
 	DescriptionContains string `protobuf:"bytes,4,opt,name=description_contains,json=descriptionContains,proto3" json:"description_contains,omitempty"`
 	// Per-log target QPS. 0 = use protocol default (Google 25, others 10).
@@ -538,6 +542,13 @@ func (x *IngestAllRequest) GetProtocols() []string {
 func (x *IngestAllRequest) GetOperators() []string {
 	if x != nil {
 		return x.Operators
+	}
+	return nil
+}
+
+func (x *IngestAllRequest) GetExcludedOperators() []string {
+	if x != nil {
+		return x.ExcludedOperators
 	}
 	return nil
 }
@@ -762,12 +773,14 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\x06DbInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
 	"\n" +
-	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\"\xd7\x02\n" +
+	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\"\x86\x03\n" +
 	"\x10IngestAllRequest\x12 \n" +
 	"\flog_list_url\x18\x01 \x01(\tR\n" +
 	"logListUrl\x12\x1c\n" +
 	"\tprotocols\x18\x02 \x03(\tR\tprotocols\x12\x1c\n" +
-	"\toperators\x18\x03 \x03(\tR\toperators\x121\n" +
+	"\toperators\x18\x03 \x03(\tR\toperators\x12-\n" +
+	"\x12excluded_operators\x18\n" +
+	" \x03(\tR\x11excludedOperators\x121\n" +
 	"\x14description_contains\x18\x04 \x01(\tR\x13descriptionContains\x12\x1e\n" +
 	"\vper_log_qps\x18\x05 \x01(\x01R\tperLogQps\x12+\n" +
 	"\x12batch_size_per_log\x18\x06 \x01(\x03R\x0fbatchSizePerLog\x12\x1d\n" +

@@ -31,6 +31,7 @@ var (
 	logListURL          = flag.String("log-list", "", "log_list.json URL (empty = gstatic v3 default)")
 	protocols           = flag.String("protocols", "", "comma-separated protocol filter for --all (e.g. 'static-ct-api,rfc6962'); empty = both")
 	operators           = flag.String("operators", "", "comma-separated operator filter for --all (e.g. \"Let's Encrypt,Google\"); empty = all")
+	excludeOperators    = flag.String("exclude-operators", "", "comma-separated operators to exclude from --all (e.g. \"Geomys\")")
 	descContains        = flag.String("desc-contains", "", "only logs whose description contains this substring (e.g. '2026h1')")
 	perLogQPS           = flag.Float64("per-log-qps", 0, "target QPS per log under --all; 0 = protocol default (static=20, rfc6962=10)")
 	batchSizePerLog     = flag.Int64("batch-per-log", 0, "entries-per-log cap for --all (0 = run until each log is caught up)")
@@ -69,6 +70,7 @@ func runIngestAll(ctx context.Context, client pb.CTIngestionServiceClient) {
 		LogListUrl:          *logListURL,
 		Protocols:           splitCSV(*protocols),
 		Operators:           splitCSV(*operators),
+		ExcludedOperators:   splitCSV(*excludeOperators),
 		DescriptionContains: *descContains,
 		PerLogQps:           *perLogQPS,
 		BatchSizePerLog:     *batchSizePerLog,

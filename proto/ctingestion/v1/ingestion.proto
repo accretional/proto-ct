@@ -87,6 +87,10 @@ message IngestAllRequest {
   repeated string protocols = 2;
   // Filter by operator name. Empty = all operators.
   repeated string operators = 3;
+  // Exclude these operators from the ingest. Applied AFTER the operators
+  // filter. Useful for skipping operators whose rate limits make them not
+  // worth the effort (e.g. Geomys at 1 QPS aggregate).
+  repeated string excluded_operators = 10;
   // Optional substring match on log description (e.g. "2026h1"). Empty = no filter.
   string description_contains = 4;
   // Per-log target QPS. 0 = use protocol default (Google 25, others 10).

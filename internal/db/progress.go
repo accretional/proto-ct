@@ -30,7 +30,11 @@ func OpenProgressDB(path string) (*ProgressDB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open progress db: %w", err)
 	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
+	// Single writer connection — multi-log fan-out has dozens of goroutines
+	// touching this DB; SQLite PRAGMAs are per-connection so MaxOpenConns(1)
+	// is the most reliable way to keep them in effect for every operation.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout = 10000;`); err != nil {
 		db.Close()
 		return nil, err
 	}

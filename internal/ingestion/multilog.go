@@ -25,16 +25,40 @@ import (
 // their per-call cap is (typically 32–256) and the client loops internally.
 const multilogPageSize = 256
 
-// Per-protocol default QPS budgets when the request leaves per_log_qps == 0.
-// These are conservative; operators publish stricter caps that we stay under.
-func protocolDefaultQPS(p ctlist.Protocol) float64 {
-	switch p {
-	case ctlist.ProtocolStaticCT:
-		return 20
-	case ctlist.ProtocolRFC6962:
-		return 10
+// defaultQPS picks a conservative per-log rate based on operator + protocol.
+// Smaller operators (Geomys, IPng, TrustAsia) cap below 10 QPS and return 429
+// at higher rates; Let's Encrypt and Google tolerate more. Used when the
+// request leaves per_log_qps == 0.
+func defaultQPS(lg ctlist.Log) float64 {
+	// Tuned 2026-05-27 21:00 from autonomous QPS loop — bumped operators with
+	// zero rate-limit errors in the prior cycle by 50%, kept Geomys/Sectigo
+	// pinned (429s / 409s observed).
+	switch lg.Operator {
+	case "Let's Encrypt":
+		return 30 // up from 20; 0 errors at 20 with 8 shards
+	case "Google":
+		return 25 // at the published per-log cap
+	case "Cloudflare":
+		return 15 // up from 10
+	case "Geomys":
+		// 4 Tuscolo shards × 1 QPS = 4 aggregate. Still 429s occasionally.
+		return 1
+	case "IPng Networks":
+		return 12 // 8 → 12 (algorithm bump, 55% threshold, clean)
+	case "TrustAsia":
+		return 8
+	case "DigiCert":
+		return 12 // 8 → 12 (algorithm bump, 52% threshold, clean)
+	case "Sectigo":
+		return 12 // 8 → 12 (algorithm bump, 65% threshold, clean)
 	}
-	return 5
+	switch lg.Protocol {
+	case ctlist.ProtocolStaticCT:
+		return 5
+	case ctlist.ProtocolRFC6962:
+		return 5
+	}
+	return 3
 }
 
 // IngestAll fans out one worker per usable log in the catalog and streams
@@ -61,6 +85,9 @@ func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionServi
 	}
 	if len(req.Operators) > 0 {
 		catalog = filterByOperators(catalog, req.Operators)
+	}
+	if len(req.ExcludedOperators) > 0 {
+		catalog = ctlist.FilterExcludeOperators(catalog, req.ExcludedOperators)
 	}
 	if req.DescriptionContains != "" {
 		catalog = filterByDescription(catalog, req.DescriptionContains)
@@ -170,7 +197,7 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 	lg := in.log
 	qps := in.req.PerLogQps
 	if qps == 0 {
-		qps = protocolDefaultQPS(lg.Protocol)
+		qps = defaultQPS(lg)
 	}
 
 	var client ctlog.LogClient
@@ -237,6 +264,14 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 		}
 		leaves, err := client.FetchEntries(ctx, cursor, end)
 		if err != nil {
+			// Static-ct-api logs publish tiles asynchronously after the
+			// checkpoint advances; the trailing tile can 403/404 for a few
+			// seconds while we're at the frontier. Treat that as caught_up
+			// rather than a fatal error.
+			if ctlog.IsNotFound(err) {
+				in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+				return
+			}
 			in.events <- buildErrorEvent(lg, cursor, run.TotalProcessed+sessionProcessed, err)
 			return
 		}

@@ -229,7 +229,16 @@ func IsNotFound(err error) bool {
 
 func isFatalHTTP(err error) bool {
 	var he *httpError
-	return errors.As(err, &he) && he.code >= 400 && he.code < 500
+	if !errors.As(err, &he) {
+		return false
+	}
+	// 429 (Too Many Requests) and 409 (Conflict, observed from Sectigo on
+	// get-entries) are operator "back off / try again" signals — retry with
+	// the existing exponential delay. All other 4xx are permanent failures.
+	if he.code == http.StatusTooManyRequests || he.code == http.StatusConflict {
+		return false
+	}
+	return he.code >= 400 && he.code < 500
 }
 
 // tileIndexPath encodes a tile index as a path per the static-ct-api spec.

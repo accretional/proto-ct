@@ -128,6 +128,25 @@ func FilterUsable(logs []Log) []Log {
 	return out
 }
 
+// FilterExcludeOperators removes logs whose Operator matches any name in ops.
+// Useful for skipping operators that are not worth the rate-limit overhead.
+func FilterExcludeOperators(logs []Log, ops []string) []Log {
+	if len(ops) == 0 {
+		return logs
+	}
+	skip := make(map[string]bool, len(ops))
+	for _, o := range ops {
+		skip[o] = true
+	}
+	out := make([]Log, 0, len(logs))
+	for _, l := range logs {
+		if !skip[l.Operator] {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // FilterByProtocol returns only logs matching one of the given protocols.
 // Pass no arguments to return all.
 func FilterByProtocol(logs []Log, protos ...Protocol) []Log {
