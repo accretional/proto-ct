@@ -43,9 +43,9 @@ type Subject struct {
 	NotBefore    string
 	NotAfter     string
 	SANDomains   string // comma-separated DNS SANs
-	SANIPS        string // comma-separated IP SANs
+	SANIPS       string // comma-separated IP SANs
 	URL          string
-	IsWildcard   int    // 1 if any SAN starts with "*."
+	IsWildcard   int // 1 if any SAN starts with "*."
 	SANCount     int
 	EntryType    string // "x509" | "precert"
 	TileIdx      int
@@ -59,10 +59,10 @@ type Subject struct {
 // CertLogEntry records that a leaf with cert_hash was observed in log_id at entry_idx.
 // One subjects row + N cert_log rows represent the same cert appearing in N logs.
 type CertLogEntry struct {
-	LogID     []byte // 32 bytes
-	EntryIdx  int64  // global index within the log
-	CertHash  []byte // 32 bytes
-	SeenAt    int64  // unix epoch seconds
+	LogID    []byte // 32 bytes
+	EntryIdx int64  // global index within the log
+	CertHash []byte // 32 bytes
+	SeenAt   int64  // unix epoch seconds
 }
 
 // OpenIssuerDB opens or creates the issuer database at path.
@@ -202,11 +202,19 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 	}
 	// Ensure both idempotency indexes exist on older databases.
 	// Tile-entry index stays for legacy single-log writes (with non-NULL values).
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`) //nolint:errcheck
+	// Log (don't swallow) failures: a failure here means the table already holds
+	// duplicate keys, so the unique index is NOT enforced and dedup is silently
+	// broken — exactly how a partition ends up with the dups that later wedge a
+	// full rebuild. Surfacing it lets us catch a corrupt/legacy DB early.
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_tile_entry ON subjects(tile_idx, entry_idx)`); err != nil {
+		log.Printf("warn: %s: idx_subjects_tile_entry not enforced (existing duplicate keys?): %v", path, err)
+	}
 	// Partial unique index — only enforced when cert_hash is set. New multi-log
 	// writes populate cert_hash and leave tile/entry NULL, so the two indexes
 	// don't conflict.
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_cert_hash ON subjects(cert_hash) WHERE cert_hash IS NOT NULL`) //nolint:errcheck
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_cert_hash ON subjects(cert_hash) WHERE cert_hash IS NOT NULL`); err != nil {
+		log.Printf("warn: %s: idx_subjects_cert_hash not enforced (existing duplicate keys?): %v", path, err)
+	}
 
 	// Per-log provenance: tracks where each cert was seen. PK (log_id, entry_idx)
 	// makes resume idempotent — re-fetching an entry is a no-op insert.
@@ -243,20 +251,22 @@ const subjectCols = `ca_id, serial_number, common_name, organization, state, cou
 // with all rows written sequentially, then atomically replaces dstPath.
 // The result is a compact, unfragmented database with fast sequential reads.
 func MergeSubjectDBs(srcPath, dstPath string) error {
-	newPath := dstPath + ".new"
+	// Process-unique temp name so a second process can never clobber our build
+	// (intra-process concurrency is already prevented by archiveFlushMu).
+	newPath := fmt.Sprintf("%s.new.%d", dstPath, os.Getpid())
 	os.Remove(newPath) // remove any stale file from a prior interrupted run
 	if err := buildMergedSubjectDB(dstPath, srcPath, newPath); err != nil {
 		os.Remove(newPath)
 		return err
 	}
-	// Atomically replace the old file. Clean up WAL artifacts from the old DB
-	// first so the new file isn't mistakenly paired with a stale WAL.
+	// Clean up the old DB's WAL/SHM so the replaced file isn't paired with a
+	// stale WAL. Do NOT remove dstPath itself: os.Rename atomically replaces it
+	// on the same filesystem, whereas a pre-delete would leave a window in which
+	// the month has no file at all (the bug that destroyed 2024-12 under a
+	// concurrent flush). Atomic replace = worst case is last-writer-wins, never
+	// data loss.
 	os.Remove(dstPath + "-wal")
 	os.Remove(dstPath + "-shm")
-	if err := os.Remove(dstPath); err != nil {
-		os.Remove(newPath)
-		return fmt.Errorf("remove old subjects db: %w", err)
-	}
 	return os.Rename(newPath, dstPath)
 }
 
@@ -313,7 +323,11 @@ func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
 		return fmt.Errorf("attach src subjects: %w", err)
 	}
 	// All existing archive rows first — written as sequential fresh pages.
-	if _, err := db.Exec(`INSERT INTO subjects (` + subjectCols + `)
+	// OR IGNORE (not plain INSERT) so a legacy/corrupt archive that already
+	// contains duplicate (tile_idx,entry_idx) or cert_hash rows is healed by
+	// collapsing the dup to a single row, rather than aborting the whole
+	// rebuild. The unique indexes define row identity, so this is lossless.
+	if _, err := db.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
 		SELECT ` + subjectCols + ` FROM existing.subjects`); err != nil {
 		return fmt.Errorf("copy existing subjects: %w", err)
 	}
@@ -535,18 +549,28 @@ func (p *SubjectDBPool) InsertBatch(subjects []Subject) error {
 // contiguous and avoid read-path degradation.
 const incrementalMergeThreshold = 256 << 20 // 256 MiB
 
+// archiveFlushMu serializes ALL writes into the shared HDD archive across the
+// whole process. Two FlushAll passes (e.g. the hourly rollover flush and the
+// IngestAll-exit deferred flush) operate on different pool instances but write
+// the same archive months; without this lock they race on each month's
+// build/rename and can destroy an archive month. Every entry point that merges
+// into the archive (FlushAll, FlushArchiveMonth) takes this lock.
+var archiveFlushMu sync.Mutex
+
 // FlushAll checkpoints and closes every open DB, then merges each into
 // archiveRoot/YYYY-MM/subjects.db using the most appropriate strategy:
 //
 //   - Archive doesn't exist: copy active file across, build query indexes.
 //   - Active < 256 MiB:      INSERT OR IGNORE directly into archive (fast,
-//                             minimal fragmentation for small incremental batches).
+//     minimal fragmentation for small incremental batches).
 //   - Active >= 256 MiB:     full rebuild via MergeSubjectDBs (prevents B-tree
-//                             fragmentation after large bulk ingestion runs).
+//     fragmentation after large bulk ingestion runs).
 //
 // All months are attempted regardless of individual errors; the first error
 // encountered is returned.
 func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
+	archiveFlushMu.Lock()
+	defer archiveFlushMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var firstErr error

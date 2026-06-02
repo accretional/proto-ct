@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/benfultz/proto-ct/gen/ctingestion/v1"
@@ -20,10 +21,32 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// rolloverInterval is how often IngestAll swaps to a fresh SubjectDBPool and
+// flushes the previous one to the archive. Bounded SSD usage is the main goal;
+// secondary benefit is making the archive snapshot-current at predictable
+// intervals. Constant for now; can become configurable when there's reason.
+const rolloverInterval = 1 * time.Hour
+
+// rolloverDrainGrace is how long to wait between atomically swapping the pool
+// reference and calling FlushAll on the old pool. Any worker that loaded the
+// old pool reference just before the swap has this much time to finish its
+// current insert. Workers still in-flight after the grace will see "DB closed"
+// errors when FlushAll closes the old pool's DBs — those batches are lost, but
+// the worker logs and moves on; INSERT OR IGNORE makes a subsequent re-fetch
+// of the same cursor range idempotent.
+const rolloverDrainGrace = 3 * time.Second
+
 // Page size for one FetchEntries call per worker. 256 lines up with the tile
 // boundary used by static-ct-api; RFC 6962 logs will return up to whatever
 // their per-call cap is (typically 32–256) and the client loops internally.
 const multilogPageSize = 256
+
+// poolDirName builds a per-rollover staging dir name. Includes time so several
+// rollovers in the same day get distinct dirs (avoids collisions with prior
+// session leftovers and makes each pool's active path unique).
+func poolDirName(t time.Time) string {
+	return t.Local().Format("20060102_150405")
+}
 
 // defaultQPS picks a conservative per-log rate based on operator + protocol.
 // Smaller operators (Geomys, IPng, TrustAsia) cap below 10 QPS and return 429
@@ -119,24 +142,35 @@ func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionServi
 	}
 	s.setMetrics(nil, activeDir, archiveDir, "")
 
-	progressDB, err := db.OpenProgressDB(filepath.Join(archiveDir, "progress.db"))
+	// Shared DBs live on the SSD next to the active staging dir — they're
+	// small (KBs-MBs) but hot-write (every UpdateLogProgress / UpsertIssuer
+	// hits them). Keeping them off the HDD eliminates ~all the audible
+	// platter activity during steady-state ingest.
+	progressDB, err := db.OpenProgressDB(filepath.Join(activeDir, "progress.db"))
 	if err != nil {
 		return status.Errorf(codes.Internal, "open progress db: %v", err)
 	}
 	defer progressDB.Close()
 
-	issuerDB, err := db.OpenIssuerDB(filepath.Join(archiveDir, "issuers.db"))
+	issuerDB, err := db.OpenIssuerDB(filepath.Join(activeDir, "issuers.db"))
 	if err != nil {
 		return status.Errorf(codes.Internal, "open issuer db: %v", err)
 	}
 	defer issuerDB.CheckpointAndClose()
 	var issuerMu sync.Mutex
 
-	currentDate := time.Now().Local().Format("20060102")
-	pool := db.NewSubjectDBPool(filepath.Join(activeDir, currentDate))
+	// Atomic-swappable pool reference: the rollover coordinator below replaces
+	// it with a fresh pool every rolloverInterval, then flushes the old one to
+	// the archive. Workers re-load this on every iteration so they always
+	// write into the current pool.
+	var poolRef atomic.Pointer[db.SubjectDBPool]
+	poolRef.Store(db.NewSubjectDBPool(filepath.Join(activeDir, poolDirName(time.Now()))))
 	defer func() {
-		if err := pool.FlushAll(archiveDir); err != nil {
-			log.Printf("warn: flush pool at IngestAll end: %v", err)
+		// Final flush at IngestAll exit covers whatever's still in the live pool.
+		if p := poolRef.Load(); p != nil {
+			if err := p.FlushAll(archiveDir); err != nil {
+				log.Printf("warn: flush pool at IngestAll end: %v", err)
+			}
 		}
 	}()
 
@@ -159,12 +193,39 @@ func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionServi
 				progressDB:    progressDB,
 				issuerDB:      issuerDB,
 				issuerMu:      &issuerMu,
-				pool:          pool,
+				poolRef:       &poolRef,
 				events:        events,
 				progressEvery: progressEvery,
 			})
 		}(lg)
 	}
+
+	// Rollover coordinator: every rolloverInterval, swap to a fresh pool and
+	// flush the old one to archive. Foreground flush blocks new writes for
+	// the duration of the merge — acceptable for the simpler version; the
+	// background variant can come later if needed.
+	go func() {
+		tick := time.NewTicker(rolloverInterval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				newPool := db.NewSubjectDBPool(filepath.Join(activeDir, poolDirName(time.Now())))
+				oldPool := poolRef.Swap(newPool)
+				log.Printf("rollover: pool swapped, draining %s grace before flush", rolloverDrainGrace)
+				// Brief grace for any worker that loaded oldPool just before
+				// the swap to finish its current batch.
+				time.Sleep(rolloverDrainGrace)
+				if err := oldPool.FlushAll(archiveDir); err != nil {
+					log.Printf("rollover flush: %v", err)
+				} else {
+					log.Printf("rollover: flushed old pool to archive")
+				}
+			}
+		}
+	}()
 
 	go func() {
 		wg.Wait()
@@ -188,7 +249,7 @@ type workerInputs struct {
 	progressDB    *db.ProgressDB
 	issuerDB      *db.IssuerDB
 	issuerMu      *sync.Mutex
-	pool          *db.SubjectDBPool
+	poolRef       *atomic.Pointer[db.SubjectDBPool]
 	events        chan<- *pb.LogProgress
 	progressEvery int64
 }
@@ -308,8 +369,12 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 				SeenAt:   seenAt,
 			})
 		}
+		// Load the current pool. The rollover coordinator may swap it out
+		// from under us between iterations; loading here lets the swap take
+		// effect on the very next batch without further coordination.
+		currentPool := in.poolRef.Load()
 		for month, batch := range byMonth {
-			sdb, err := in.pool.GetOrOpen(month)
+			sdb, err := currentPool.GetOrOpen(month)
 			if err != nil {
 				log.Printf("%s open month %s: %v", shortDesc(lg), month, err)
 				continue

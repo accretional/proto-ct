@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,13 +155,15 @@ func TestRunLogWorker_RFC6962_WritesRows(t *testing.T) {
 	events := make(chan *pb.LogProgress, 16)
 
 	var issuerMu sync.Mutex
+	var poolRef atomic.Pointer[db.SubjectDBPool]
+	poolRef.Store(pool)
 	in := workerInputs{
 		log:           lg,
 		req:           &pb.IngestAllRequest{ProgressEvery: 1},
 		progressDB:    progressDB,
 		issuerDB:      issuerDB,
 		issuerMu:      &issuerMu,
-		pool:          pool,
+		poolRef:       &poolRef,
 		events:        events,
 		progressEvery: 1,
 	}
@@ -269,6 +272,8 @@ func TestRunLogWorker_RFC6962_DedupAcrossLogs(t *testing.T) {
 	pool := db.NewSubjectDBPool(filepath.Join(activeDir, "20260510"))
 
 	var issuerMu sync.Mutex
+	var poolRef atomic.Pointer[db.SubjectDBPool]
+	poolRef.Store(pool)
 	events := make(chan *pb.LogProgress, 16)
 
 	// Run two synthetic logs sequentially against the same server.
@@ -285,7 +290,7 @@ func TestRunLogWorker_RFC6962_DedupAcrossLogs(t *testing.T) {
 		}
 		runLogWorker(context.Background(), workerInputs{
 			log: lg, req: &pb.IngestAllRequest{}, progressDB: progressDB,
-			issuerDB: issuerDB, issuerMu: &issuerMu, pool: pool,
+			issuerDB: issuerDB, issuerMu: &issuerMu, poolRef: &poolRef,
 			events: events, progressEvery: 100,
 		})
 		_ = i

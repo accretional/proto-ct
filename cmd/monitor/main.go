@@ -39,6 +39,7 @@ func resolveProgressDB(path string) string {
 		return path
 	}
 	for _, candidate := range []string{
+		"data/active/progress.db", // SSD location after the rollover/shared-DB move
 		"/Volumes/wd_office_2/datasets/CT/progress.db",
 		"/tmp/ct-data/progress.db",
 		"data/progress.db",
