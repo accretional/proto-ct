@@ -40,7 +40,3 @@ bin/
 
 # Active staging directory (SSD-local, not committed)
 data/
-
-# Task notes (private)
-setup-task.md
-ratelimits.md
