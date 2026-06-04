@@ -1,3 +1,10 @@
+// DEPRECATED — WORK COMPLETE. This was a one-time migration tool; the archive
+// has already been migrated to the cert-issuance-month (YYYY-MM/subjects.db)
+// layout, which is now the live format. Retained for historical reference and
+// in case a future re-layout migration needs the same row-routing / raw-page
+// scanning machinery. Not part of the normal pipeline; do not run against the
+// live archive.
+//
 // repartition migrates an ingestion-date-partitioned CT archive to a
 // cert-issuance-month layout (YYYY-MM/subjects.db).
 //

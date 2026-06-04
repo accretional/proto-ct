@@ -19,6 +19,8 @@ echo "✓ bin/ct-client"
 go build -o bin/ct-export ./cmd/export
 echo "✓ bin/ct-export"
 
+# DEPRECATED (work complete): one-time tile→YYYY-MM migration tool, kept for
+# reference. Still built so it stays compiling; not used by the live pipeline.
 go build -o bin/ct-repartition ./cmd/repartition
 echo "✓ bin/ct-repartition"
 
