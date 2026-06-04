@@ -3,9 +3,9 @@
 # Reads TSVs from HDD, stages writes on SSD, finalizes DBs to HDD_DNS.
 # Resume-safe: skips shards whose final DB already exists.
 #
-# Depends on the local DNS stack (unbound + proto-domain server). The
-# script auto-starts both via tools/start_dns_stack.sh — opt out with
-# SKIP_STACK=1 if you're managing them externally.
+# Depends on the local DNS stack (the proto-domain server). The script
+# auto-starts it via tools/start_dns_stack.sh — opt out with SKIP_STACK=1
+# if you're managing it externally.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,7 +23,7 @@ WORKERS="${WORKERS:-1200}"
 QPS="${QPS:-500}"
 TIMEOUT="${TIMEOUT:-8s}"
 START_FROM="${START_FROM:-}"  # skip shards before this label
-SKIP_STACK="${SKIP_STACK:-}"  # set to 1 to skip auto-bringup of unbound + proto-domain
+SKIP_STACK="${SKIP_STACK:-}"  # set to 1 to skip auto-bringup of proto-domain
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 

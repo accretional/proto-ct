@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # Brings up the proto-domain server with a round-robin pool of public
-# recursive resolvers. Idempotent — re-running won't double-start the
-# server. unbound is no longer in the path (shelved); tools/unbound.conf
-# is kept in the repo for reference if we ever want to restore local
-# recursion.
+# recursive resolvers. Idempotent — re-running won't double-start the server.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
