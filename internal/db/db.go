@@ -242,32 +242,79 @@ const subjectCols = `ca_id, serial_number, common_name, organization, state, cou
 	is_wildcard, san_count, entry_type, tile_idx, entry_idx,
 	cert_hash, log_id`
 
-// MergeSubjectDBs appends all rows from srcPath into dstPath, skipping
-// duplicates on (tile_idx, entry_idx). The id column is omitted so the
-// destination assigns fresh autoincrement values — avoiding PK conflicts.
+// MergeSubjectDBsScratch merges all rows from srcPath into dstPath, skipping
+// duplicates on cert_hash / (tile_idx, entry_idx), with control over WHERE the
+// merged file is built. The merge re-inserts every existing archive row plus
+// the src rows through the unique indexes — random B-tree I/O that, on a giant
+// (>RAM) archive month living on the HDD, degrades to the ~1 MB/s
+// spinning-disk-seek wall (see docs/FLUSH_AND_SHUTDOWN_PLAN.md §B2).
 //
-// Instead of inserting into the existing dstPath (which fragments the B-tree
-// as new pages are appended non-contiguously), this builds a brand-new file
-// with all rows written sequentially, then atomically replaces dstPath.
-// The result is a compact, unfragmented database with fast sequential reads.
-func MergeSubjectDBs(srcPath, dstPath string) error {
-	// Process-unique temp name so a second process can never clobber our build
-	// (intra-process concurrency is already prevented by archiveFlushMu).
-	newPath := fmt.Sprintf("%s.new.%d", dstPath, os.Getpid())
-	os.Remove(newPath) // remove any stale file from a prior interrupted run
-	if err := buildMergedSubjectDB(dstPath, srcPath, newPath); err != nil {
-		os.Remove(newPath)
+// When scratchDir is non-empty (and writable), the whole merge — including the
+// query-index build — happens in a file there (the SSD), where random I/O is a
+// non-issue, and only the finished, compact month is copied SEQUENTIALLY to the
+// HDD and atomically renamed into place. This converts the bottleneck from
+// random-HDD to random-SSD: the §6c "dedup on SSD, bulk writes to HDD" split.
+//
+// When scratchDir is "" the merged file is built adjacent to dstPath (the old
+// behavior). A scratchDir that can't be created falls back to that too, so the
+// flush always makes progress.
+//
+// Either way dstPath is replaced via os.Rename only after the new file is fully
+// built (never pre-deleted), so an interruption leaves the existing archive
+// month intact — never the no-file window that destroyed 2024-12.
+func MergeSubjectDBsScratch(srcPath, dstPath, scratchDir string) error {
+	pid := os.Getpid()
+	hddNew := fmt.Sprintf("%s.new.%d", dstPath, pid)
+
+	// Decide where to build. crossFS == true means buildPath is on a (likely
+	// faster) filesystem than dstPath, so the finished file must be COPIED to
+	// the HDD before the atomic rename.
+	buildPath := hddNew
+	crossFS := false
+	if scratchDir != "" {
+		if err := os.MkdirAll(scratchDir, 0o755); err != nil {
+			log.Printf("warn: merge scratch dir %s unusable (%v); building adjacent to archive", scratchDir, err)
+		} else {
+			month := filepath.Base(filepath.Dir(dstPath))
+			buildPath = filepath.Join(scratchDir, fmt.Sprintf("%s.merge.%d", month, pid))
+			crossFS = true
+		}
+	}
+	removeDBFiles(buildPath) // clear any stale build from a prior interrupted run
+
+	if err := buildMergedSubjectDB(dstPath, srcPath, buildPath); err != nil {
+		removeDBFiles(buildPath)
 		return err
 	}
-	// Clean up the old DB's WAL/SHM so the replaced file isn't paired with a
-	// stale WAL. Do NOT remove dstPath itself: os.Rename atomically replaces it
-	// on the same filesystem, whereas a pre-delete would leave a window in which
-	// the month has no file at all (the bug that destroyed 2024-12 under a
-	// concurrent flush). Atomic replace = worst case is last-writer-wins, never
-	// data loss.
+	// Build the read-path indexes here too, so that random work also lands on
+	// the scratch filesystem rather than the HDD.
+	if err := BuildQueryIndexes(buildPath); err != nil {
+		log.Printf("warn: build query indexes on %s: %v", buildPath, err)
+	}
+
+	// Replace dstPath atomically. Drop the old WAL/SHM so the replaced file
+	// isn't paired with a stale sidecar.
 	os.Remove(dstPath + "-wal")
 	os.Remove(dstPath + "-shm")
-	return os.Rename(newPath, dstPath)
+	if !crossFS {
+		return os.Rename(buildPath, dstPath)
+	}
+	// Cross-filesystem: os.Rename can't move SSD→HDD, so copy the finished file
+	// to an HDD-adjacent temp (sequential write), then atomically rename it.
+	if err := copySubjectDB(buildPath, hddNew); err != nil {
+		removeDBFiles(buildPath)
+		os.Remove(hddNew)
+		return fmt.Errorf("copy merged month to archive fs: %w", err)
+	}
+	removeDBFiles(buildPath)
+	return os.Rename(hddNew, dstPath)
+}
+
+// removeDBFiles deletes a SQLite db path and its WAL/SHM/journal sidecars.
+func removeDBFiles(path string) {
+	for _, suf := range []string{"", "-wal", "-shm", "-journal"} {
+		os.Remove(path + suf)
+	}
 }
 
 // buildMergedSubjectDB creates newPath as a fresh subjects database containing
@@ -281,11 +328,16 @@ func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	// Large cache + mmap keep the cert_hash unique-index working set resident in
+	// RAM during the rebuild, so the random index probes hit memory instead of
+	// the scratch filesystem — the dominant cost of the merge. Sized to match
+	// MergeArchiveMonth (4 GiB cache, 8 GiB mmap); leaves headroom on 16 GB.
 	if _, err := db.Exec(`
 		PRAGMA journal_mode=OFF;
 		PRAGMA synchronous=OFF;
-		PRAGMA cache_size=-524288;
+		PRAGMA cache_size=-4194304;
 		PRAGMA temp_store=MEMORY;
+		PRAGMA mmap_size=8589934592;
 	`); err != nil {
 		return err
 	}
@@ -340,32 +392,6 @@ func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
 		return err
 	}
 	return nil
-}
-
-// MergeIssuerDBs appends all rows from srcPath into dstPath, skipping
-// duplicates on fingerprint. ca_id is omitted so fresh values are assigned.
-func MergeIssuerDBs(srcPath, dstPath string) error {
-	if _, err := os.Stat(srcPath); err != nil {
-		return nil // nothing to merge if src doesn't exist
-	}
-	dst, err := sql.Open("sqlite", dstPath)
-	if err != nil {
-		return fmt.Errorf("open dst issuers: %w", err)
-	}
-	defer dst.Close()
-	dst.SetMaxOpenConns(1)
-	if _, err := dst.Exec(`PRAGMA synchronous=OFF;`); err != nil {
-		return err
-	}
-	if _, err := dst.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
-		return fmt.Errorf("attach src issuers: %w", err)
-	}
-	if _, err := dst.Exec(`INSERT OR IGNORE INTO issuers (fingerprint, common_name, organization, country)
-		SELECT fingerprint, common_name, organization, country FROM src.issuers`); err != nil {
-		return fmt.Errorf("merge issuer rows: %w", err)
-	}
-	_, err = dst.Exec(`DETACH src`)
-	return err
 }
 
 // BuildQueryIndexes creates the read-oriented indexes on a subjects.db that was
@@ -593,26 +619,24 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 
 		var mergeErr error
 		if _, statErr := os.Stat(archivePath); os.IsNotExist(statErr) {
-			// New partition: copy file and build all query indexes.
-			mergeErr = copySubjectDB(activePath, archivePath)
-			if mergeErr == nil {
-				if err := BuildQueryIndexes(archivePath); err != nil {
-					log.Printf("pool: build indexes %s: %v", month, err)
-				}
+			// New partition: build the query indexes on the SSD active file
+			// (random work stays off the HDD), then copy it across as the
+			// archive month.
+			if err := BuildQueryIndexes(activePath); err != nil {
+				log.Printf("pool: build indexes %s: %v", month, err)
 			}
+			mergeErr = copySubjectDB(activePath, archivePath)
 		} else {
 			fi, _ := os.Stat(activePath)
 			if fi != nil && fi.Size() < incrementalMergeThreshold {
 				// Small incremental batch: insert directly, no rebuild.
 				mergeErr = mergeSubjectDBsDirect(activePath, archivePath)
 			} else {
-				// Large bulk flush: rebuild from scratch to prevent fragmentation.
-				mergeErr = MergeSubjectDBs(activePath, archivePath)
-				if mergeErr == nil {
-					if err := BuildQueryIndexes(archivePath); err != nil {
-						log.Printf("pool: build indexes %s: %v", month, err)
-					}
-				}
+				// Large bulk flush: rebuild via the SSD scratch dir so the
+				// cert_hash random-probe I/O lands on the SSD, not the HDD
+				// (the ~1 MB/s wall). Query indexes are built in the same
+				// scratch pass, so no separate BuildQueryIndexes here.
+				mergeErr = MergeSubjectDBsScratch(activePath, archivePath, p.activeDir)
 			}
 		}
 		if mergeErr != nil {

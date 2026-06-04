@@ -36,6 +36,12 @@ const rolloverInterval = 1 * time.Hour
 // of the same cursor range idempotent.
 const rolloverDrainGrace = 3 * time.Second
 
+// flushQueueDepth bounds how many swapped-out pools may wait for the background
+// flush worker before the rollover coordinator blocks (backpressure). Each
+// queued pool is ~one rolloverInterval of staged data sitting on the SSD, so a
+// small depth keeps SSD use bounded while still absorbing brief flush bursts.
+const flushQueueDepth = 4
+
 // Page size for one FetchEntries call per worker. 256 lines up with the tile
 // boundary used by static-ct-api; RFC 6962 logs will return up to whatever
 // their per-call cap is (typically 32–256) and the client loops internally.
@@ -89,6 +95,13 @@ func defaultQPS(lg ctlist.Log) float64 {
 // the new cert_hash / cert_log / log_runs schema.
 func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionService_IngestAllServer) error {
 	ctx := stream.Context()
+	// Fold the server-wide shutdown signal into the worker context so a SIGTERM
+	// drains workers and triggers the deferred final flush (graceful shutdown).
+	if s.shutdownCtx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = mergeContext(ctx, s.shutdownCtx)
+		defer cancel()
+	}
 
 	// ── catalog ────────────────────────────────────────────────────────────
 	// Use the persisted snapshot when it's recent; otherwise fetch, persist,
@@ -160,18 +173,47 @@ func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionServi
 	var issuerMu sync.Mutex
 
 	// Atomic-swappable pool reference: the rollover coordinator below replaces
-	// it with a fresh pool every rolloverInterval, then flushes the old one to
-	// the archive. Workers re-load this on every iteration so they always
-	// write into the current pool.
+	// it with a fresh pool every rolloverInterval and hands the old one to the
+	// background flush worker. Workers re-load this on every iteration so they
+	// always write into the current pool.
 	var poolRef atomic.Pointer[db.SubjectDBPool]
 	poolRef.Store(db.NewSubjectDBPool(filepath.Join(activeDir, poolDirName(time.Now()))))
-	defer func() {
-		// Final flush at IngestAll exit covers whatever's still in the live pool.
-		if p := poolRef.Load(); p != nil {
-			if err := p.FlushAll(archiveDir); err != nil {
-				log.Printf("warn: flush pool at IngestAll end: %v", err)
+
+	// Background flush worker: a single goroutine merges pools into the archive
+	// one at a time, OFF the rollover and ingest paths. Previously the rollover
+	// coordinator ran FlushAll inline, so a multi-hour merge stalled the hourly
+	// ticker and the live pool grew to 50-64 GB between rollovers. Now the ticker
+	// keeps firing; the bounded queue applies backpressure only if flushing falls
+	// more than flushQueueDepth merges behind. (archiveFlushMu in FlushAll still
+	// guards the archive, but a single flusher means no contention.)
+	flushCh := make(chan *db.SubjectDBPool, flushQueueDepth)
+	flushWorkerDone := make(chan struct{})
+	go func() {
+		defer close(flushWorkerDone)
+		for pool := range flushCh {
+			if err := pool.FlushAll(archiveDir); err != nil {
+				log.Printf("background flush: %v", err)
+			} else {
+				log.Printf("background flush: pool flushed to archive")
 			}
 		}
+	}()
+
+	// ingestCtx is cancelled when IngestAll returns, to stop the rollover
+	// coordinator — it otherwise blocks on its ticker until the stream context
+	// is done, which on a clean caught-up finish never happens.
+	ingestCtx, ingestCancel := context.WithCancel(ctx)
+	var rolloverWg sync.WaitGroup
+
+	defer func() {
+		// Final flush + teardown, on every post-setup return path: stop the
+		// rollover coordinator, flush whatever's still in the live pool, then
+		// drain the worker (incl. any pools the coordinator queued).
+		ingestCancel()
+		rolloverWg.Wait()
+		flushCh <- poolRef.Load()
+		close(flushCh)
+		<-flushWorkerDone
 	}()
 
 	progressEvery := req.ProgressEvery
@@ -201,27 +243,32 @@ func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionServi
 	}
 
 	// Rollover coordinator: every rolloverInterval, swap to a fresh pool and
-	// flush the old one to archive. Foreground flush blocks new writes for
-	// the duration of the merge — acceptable for the simpler version; the
-	// background variant can come later if needed.
+	// hand the old one to the background flush worker. The swap is instant; the
+	// flush happens off this goroutine, so the ticker keeps a steady cadence.
+	rolloverWg.Add(1)
 	go func() {
+		defer rolloverWg.Done()
 		tick := time.NewTicker(rolloverInterval)
 		defer tick.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-ingestCtx.Done():
 				return
 			case <-tick.C:
 				newPool := db.NewSubjectDBPool(filepath.Join(activeDir, poolDirName(time.Now())))
 				oldPool := poolRef.Swap(newPool)
-				log.Printf("rollover: pool swapped, draining %s grace before flush", rolloverDrainGrace)
+				log.Printf("rollover: pool swapped, draining %s grace before handoff", rolloverDrainGrace)
 				// Brief grace for any worker that loaded oldPool just before
 				// the swap to finish its current batch.
 				time.Sleep(rolloverDrainGrace)
-				if err := oldPool.FlushAll(archiveDir); err != nil {
-					log.Printf("rollover flush: %v", err)
-				} else {
-					log.Printf("rollover: flushed old pool to archive")
+				select {
+				case flushCh <- oldPool:
+					log.Printf("rollover: queued old pool for background flush")
+				case <-ingestCtx.Done():
+					// Returning: enqueue synchronously so the pool isn't dropped
+					// (teardown drains the worker), then stop.
+					flushCh <- oldPool
+					return
 				}
 			}
 		}

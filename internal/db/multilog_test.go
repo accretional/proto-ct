@@ -3,9 +3,110 @@ package db
 import (
 	"bytes"
 	"crypto/sha256"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// makeSubjectsDB creates a checkpointed subjects.db at path holding one row per
+// cert tag (cert_hash = sha256(tag), unique-dedup key).
+func makeSubjectsDB(t *testing.T, path string, tags ...string) {
+	t.Helper()
+	sdb, err := OpenSubjectDB(path)
+	if err != nil {
+		t.Fatalf("OpenSubjectDB %s: %v", path, err)
+	}
+	var batch []Subject
+	for i, tag := range tags {
+		h := sha256.Sum256([]byte(tag))
+		lg := sha256.Sum256([]byte("log"))
+		batch = append(batch, Subject{
+			CAID: 1, SerialNumber: tag, CommonName: tag + ".example.com",
+			NotBefore: "2026-05-01", NotAfter: "2026-08-01", EntryType: "x509",
+			CertHash: h[:], LogID: lg[:], SANCount: i,
+		})
+	}
+	if err := sdb.InsertSubjectBatch(batch); err != nil {
+		t.Fatalf("InsertSubjectBatch %s: %v", path, err)
+	}
+	if err := sdb.CheckpointAndClose(); err != nil {
+		t.Fatalf("CheckpointAndClose %s: %v", path, err)
+	}
+}
+
+func subjectsCount(t *testing.T, path string) int {
+	t.Helper()
+	sdb, err := OpenSubjectDB(path)
+	if err != nil {
+		t.Fatalf("reopen %s: %v", path, err)
+	}
+	defer sdb.Close()
+	var n int
+	if err := sdb.db.QueryRow(`SELECT COUNT(*) FROM subjects`).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", path, err)
+	}
+	return n
+}
+
+// TestMergeSubjectDBsScratch_DedupAndScratchHygiene merges a pool month that
+// overlaps the archive, building via a separate scratch dir (the SSD path), and
+// checks: dedup across existing+src, query indexes present, and no scratch/.new
+// leftovers.
+func TestMergeSubjectDBsScratch_DedupAndScratchHygiene(t *testing.T) {
+	root := t.TempDir()
+	archiveDir := filepath.Join(root, "archive", "2026-05")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(archiveDir, "subjects.db")
+	scratchDir := filepath.Join(root, "scratch") // stands in for the SSD pool dir
+
+	// Existing archive holds A, B; incoming pool holds B (dup), C, D (new).
+	makeSubjectsDB(t, archivePath, "A", "B")
+	srcPath := filepath.Join(root, "pool", "subjects.db")
+	if err := os.MkdirAll(filepath.Dir(srcPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeSubjectsDB(t, srcPath, "B", "C", "D")
+
+	if err := MergeSubjectDBsScratch(srcPath, archivePath, scratchDir); err != nil {
+		t.Fatalf("MergeSubjectDBsScratch: %v", err)
+	}
+
+	// Hygiene (checked before any reopen, which would create its own -wal/-shm):
+	// no scratch leftovers and no .new/.merge build orphans next to the archive.
+	if ents, _ := os.ReadDir(scratchDir); len(ents) != 0 {
+		t.Errorf("scratch dir not cleaned: %v", ents)
+	}
+	archiveEnts, _ := os.ReadDir(archiveDir)
+	for _, e := range archiveEnts {
+		if n := e.Name(); strings.Contains(n, ".new.") || strings.Contains(n, ".merge.") {
+			t.Errorf("build orphan left in archive dir: %s", n)
+		}
+	}
+
+	// A, B, C, D — B collapsed, so 4 unique rows.
+	if got := subjectsCount(t, archivePath); got != 4 {
+		t.Errorf("expected 4 deduped rows, got %d", got)
+	}
+
+	// Query indexes must have been built (on the scratch file, carried across).
+	sdb, err := OpenSubjectDB(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdb.Close()
+	var idxCount int
+	if err := sdb.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_subjects_cn'`,
+	).Scan(&idxCount); err != nil {
+		t.Fatal(err)
+	}
+	if idxCount != 1 {
+		t.Errorf("query index idx_subjects_cn missing after scratch merge")
+	}
+}
 
 func TestProgressDB_LogRunRoundTrip(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "progress.db")
