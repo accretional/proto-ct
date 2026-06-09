@@ -263,6 +263,29 @@ const subjectCols = `ca_id, serial_number, common_name, organization, state, cou
 // built (never pre-deleted), so an interruption leaves the existing archive
 // month intact — never the no-file window that destroyed 2024-12.
 func MergeSubjectDBsScratch(srcPath, dstPath, scratchDir string) error {
+	return scratchRebuildArchive(dstPath, scratchDir, "merge", func(buildPath string) error {
+		if err := buildMergedSubjectDB(dstPath, srcPath, buildPath); err != nil {
+			return err
+		}
+		// Build the read-path indexes here too, so that random work also lands on
+		// the scratch filesystem rather than the HDD.
+		if err := BuildQueryIndexes(buildPath); err != nil {
+			log.Printf("warn: build query indexes on %s: %v", buildPath, err)
+		}
+		return nil
+	})
+}
+
+// scratchRebuildArchive builds a replacement for the archive db at dstPath by
+// invoking build(buildPath) — which must write a complete subjects db at the
+// path it is given — then atomically swaps it into place. When scratchDir is set
+// (and usable) the build happens there (the SSD, so any random index work stays
+// off the HDD) and the finished file is copied SEQUENTIALLY to the HDD before the
+// rename; otherwise it is built adjacent to dstPath. dstPath is never
+// pre-deleted, so an interruption leaves the existing month intact (never the
+// no-file window that destroyed 2024-12). tag names the scratch build file
+// (e.g. "merge", "migrate").
+func scratchRebuildArchive(dstPath, scratchDir, tag string, build func(buildPath string) error) error {
 	pid := os.Getpid()
 	hddNew := fmt.Sprintf("%s.new.%d", dstPath, pid)
 
@@ -273,23 +296,18 @@ func MergeSubjectDBsScratch(srcPath, dstPath, scratchDir string) error {
 	crossFS := false
 	if scratchDir != "" {
 		if err := os.MkdirAll(scratchDir, 0o755); err != nil {
-			log.Printf("warn: merge scratch dir %s unusable (%v); building adjacent to archive", scratchDir, err)
+			log.Printf("warn: scratch dir %s unusable (%v); building adjacent to archive", scratchDir, err)
 		} else {
 			month := filepath.Base(filepath.Dir(dstPath))
-			buildPath = filepath.Join(scratchDir, fmt.Sprintf("%s.merge.%d", month, pid))
+			buildPath = filepath.Join(scratchDir, fmt.Sprintf("%s.%s.%d", month, tag, pid))
 			crossFS = true
 		}
 	}
 	removeDBFiles(buildPath) // clear any stale build from a prior interrupted run
 
-	if err := buildMergedSubjectDB(dstPath, srcPath, buildPath); err != nil {
+	if err := build(buildPath); err != nil {
 		removeDBFiles(buildPath)
 		return err
-	}
-	// Build the read-path indexes here too, so that random work also lands on
-	// the scratch filesystem rather than the HDD.
-	if err := BuildQueryIndexes(buildPath); err != nil {
-		log.Printf("warn: build query indexes on %s: %v", buildPath, err)
 	}
 
 	// Replace dstPath atomically. Drop the old WAL/SHM so the replaced file
@@ -304,7 +322,7 @@ func MergeSubjectDBsScratch(srcPath, dstPath, scratchDir string) error {
 	if err := copySubjectDB(buildPath, hddNew); err != nil {
 		removeDBFiles(buildPath)
 		os.Remove(hddNew)
-		return fmt.Errorf("copy merged month to archive fs: %w", err)
+		return fmt.Errorf("copy rebuilt month to archive fs: %w", err)
 	}
 	removeDBFiles(buildPath)
 	return os.Rename(hddNew, dstPath)
@@ -389,6 +407,75 @@ func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
 		return fmt.Errorf("merge src subjects: %w", err)
 	}
 	if _, err := db.Exec(`DETACH existing; DETACH src`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// buildIndexFreeHeap writes newPath as a fresh subjects db holding every row
+// from existingPath with ONLY the tile_entry unique index — no cert_hash unique
+// index and no read-path query indexes. This is the append-only on-disk form: a
+// month in this shape takes pure sequential appends (no large index to maintain),
+// and SealMonth later rebuilds the cert_hash + query indexes.
+//
+// It exists to migrate a pre-existing, fully-indexed archive month onto the
+// append-only path WITHOUT the in-place DROP of its giant cert_hash index, which
+// on a >RAM HDD month degrades to the random-seek wall (~37 min on an 11 GB month
+// in testing). Built fresh on scratch via scratchRebuildArchive, this is instead
+// a sequential heap read + write. The tile_entry unique index is kept (it dedups
+// legacy cert_hash-NULL rows and is all-NULL/cheap for multi-log rows).
+func buildIndexFreeHeap(existingPath, newPath string) error {
+	db, err := sql.Open("sqlite", newPath)
+	if err != nil {
+		return fmt.Errorf("create index-free heap: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=OFF;
+		PRAGMA synchronous=OFF;
+		PRAGMA cache_size=-1048576;
+		PRAGMA temp_store=MEMORY;
+		PRAGMA mmap_size=8589934592;
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE subjects (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			ca_id         INTEGER NOT NULL,
+			serial_number TEXT,
+			common_name   TEXT,
+			organization  TEXT,
+			state         TEXT,
+			country       TEXT,
+			not_before    TEXT,
+			not_after     TEXT,
+			san_domains   TEXT,
+			san_ips       TEXT,
+			url           TEXT,
+			is_wildcard   INTEGER DEFAULT 0,
+			san_count     INTEGER DEFAULT 0,
+			entry_type    TEXT    DEFAULT 'x509',
+			tile_idx      INTEGER,
+			entry_idx     INTEGER,
+			cert_hash     BLOB,
+			log_id        BLOB
+		);
+		CREATE UNIQUE INDEX idx_subjects_tile_entry ON subjects(tile_idx, entry_idx);
+	`); err != nil {
+		return fmt.Errorf("create index-free schema: %w", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ATTACH '%s' AS existing`, existingPath)); err != nil {
+		return fmt.Errorf("attach existing subjects: %w", err)
+	}
+	// OR IGNORE collapses any legacy (tile_idx,entry_idx) duplicate; multi-log
+	// rows have NULL tile/entry (distinct under the unique index) so all are kept.
+	if _, err := db.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
+		SELECT ` + subjectCols + ` FROM existing.subjects`); err != nil {
+		return fmt.Errorf("copy existing into heap: %w", err)
+	}
+	if _, err := db.Exec(`DETACH existing`); err != nil {
 		return err
 	}
 	return nil
@@ -658,7 +745,7 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 			// run rarely (caught-up month / end of a bulk drain), not on every
 			// rollover. Only the first flush of a pre-existing month pays a one-time
 			// O(month) DROP of its old cert_hash index; every flush after is fast.
-			mergeErr = FlushMonthDeduped(activePath, archivePath, dedupPath)
+			mergeErr = FlushMonthDeduped(activePath, archivePath, dedupPath, p.activeDir)
 		}
 		if mergeErr != nil {
 			log.Printf("pool: flush %s: %v", month, mergeErr)

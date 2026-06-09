@@ -38,6 +38,17 @@ So it never actually escaped the wall.
 3. **`FlushAll` existing-partition branch** now calls `FlushMonthDeduped`
    instead of `MergeSubjectDBsScratch`.
 
+   **One-time migration (avoids the in-place DROP wall).** A pre-existing month
+   still carries its giant `cert_hash` unique index. Dropping that in place on a
+   >RAM HDD month is itself the random-seek wall — measured at **36m58s** on the
+   11 GB 2025-12 month. So the *first* flush of such a month detects the index
+   (`hasCertHashIndex`) and rebuilds the month as an index-free heap via a
+   sequential scratch rebuild (`migrateMonthToAppendOnly` → `buildIndexFreeHeap`
+   → `scratchRebuildArchive`) — a sequential HDD read + SSD write + sequential
+   copy-back instead of a random in-place DROP. Once migrated the index is gone,
+   so every later flush skips straight to the fast append. `MergeSubjectDBsScratch`
+   was refactored to share the `scratchRebuildArchive` boilerplate.
+
 4. **`cmd/remerge-pools`** seals each touched month once at the very end (pools
    are drained by then, so the SSD has room for the seal's scratch rebuild even
    on the giants — the wall is gone). Removed the now-dead
@@ -56,14 +67,28 @@ per (pool × month) rollover.
 
 - `bash test.sh` (passing).
 - **Real-data timing** on COPIES (never the live archive — 2025-02 corruption
-  history): run the giant-month test and confirm the append is fast (O(new rows))
-  and seal is correct:
+  history). Use ABSOLUTE paths (`go test` runs with CWD = the package dir), and
+  put the big copies on the HDD + scratch/dedup on the SSD to mirror prod:
   ```
   CT_REAL_ARCHIVE=/Volumes/wd_office_2/datasets/CT/2025-12/subjects.db \
-  CT_REAL_POOL=data/active/<pool>/2025-12/subjects.db \
-  go test ./internal/db -run RealMonth -v -timeout 60m
+  CT_REAL_POOL=/Users/benfultz/Dev/proto-ct/data/active/<pool>/2025-12/subjects.db \
+  CT_REAL_WORKDIR=/Volumes/wd_office_2/tmp/ct-realtest \
+  CT_REAL_SCRATCH=/Users/benfultz/Dev/proto-ct/data/active \
+  go test ./internal/db -run RealMonth -v -timeout 120m
   ```
-  Watch the COLD vs WARM vs SEAL timings in the log.
+  Watch COLD (first touch — now a scratch migration, not the 37 min DROP) vs
+  WARM (steady state) vs SEAL timings.
+
+### Measured (2025-12: 11.4 GB archive, 23.2M rows, 784K pool rows)
+
+| Phase | Before migration opt | After migration opt |
+|---|---|---|
+| COLD (first touch) | 36m58s (in-place DROP) | _validating_ |
+| WARM (steady state) | 25s | 25s |
+| SEAL (SSD scratch) | 8m22s | 8m22s |
+
+Dedup pre-filter dropped 519K of 784K pool rows (66% cross-log overlap); SEAL
+compacted 9 transient dups; quick_check ok.
 
 ## Open follow-ups (NOT done on this branch)
 

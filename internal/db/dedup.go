@@ -313,17 +313,18 @@ func rebuildUniqueCertHash(ctx context.Context, conn *sql.Conn) error {
 // FlushMonthDeduped appends the new rows from the active month at activePath
 // into the EXISTING archive month at archivePath, using the SSD dedup set at
 // dedupPath to pre-filter out the rows already in the archive (the cross-log
-// dedup HITS) before they reach the archive's HDD unique-index probe. This
-// turns the flush from O(archive month) into O(new rows).
+// dedup HITS) before they reach the archive's HDD append. This turns the flush
+// from O(archive month) into O(new rows). scratchDir (the SSD) is used for the
+// one-time migration rebuild of a still-indexed month; "" builds adjacent.
 //
-// Correctness: the archive's cert_hash unique index is kept and the append uses
-// INSERT OR IGNORE, so the dedup set is only a performance pre-filter — if it is
-// stale/missing the worst case is extra HDD probes, never dup or lost rows. The
-// set is recorded AFTER the append, so a crash leaves the archive a superset of
-// the set and a retry is idempotent.
+// Correctness: the SSD dedup set is the dedup authority. Any hash it missed (a
+// raw-scan overflow miss on the initial seed, or a crashed-then-retried append)
+// can land a transient duplicate row, which SealMonth compacts when it rebuilds
+// the unique index — never a lost row. The set is recorded AFTER the append, so a
+// crash leaves the archive a superset of the set and a retry is idempotent.
 //
 // The archive month must already exist (FlushAll handles new partitions).
-func FlushMonthDeduped(activePath, archivePath, dedupPath string) error {
+func FlushMonthDeduped(activePath, archivePath, dedupPath, scratchDir string) error {
 	// 1. Ensure the dedup set exists and is seeded from the archive (one-time
 	//    lazy migration; also the rebuild path if the set was lost). Close it so
 	//    the archive connection below can ATTACH and write it without contention.
@@ -344,6 +345,21 @@ func FlushMonthDeduped(activePath, archivePath, dedupPath string) error {
 	}
 	if err := ds.Close(); err != nil {
 		return err
+	}
+
+	// 1b. First touch of a pre-existing, fully-indexed month: migrate it to the
+	//     index-free append-only heap via a sequential scratch rebuild, rather
+	//     than letting appendDedupedNewRows DROP the giant cert_hash index in
+	//     place (the ~37 min random-HDD wall). Idempotent: once migrated the index
+	//     is gone, so subsequent flushes skip straight to the fast append.
+	hasIdx, err := hasCertHashIndex(archivePath)
+	if err != nil {
+		return err
+	}
+	if hasIdx {
+		if err := migrateMonthToAppendOnly(archivePath, scratchDir); err != nil {
+			return fmt.Errorf("migrate %s to append-only: %w", archivePath, err)
+		}
 	}
 
 	// 2. Append the new rows into the archive, in bounded batches. The dedup set
@@ -373,6 +389,41 @@ func FlushMonthDeduped(activePath, archivePath, dedupPath string) error {
 		return fmt.Errorf("record seen: %w", err)
 	}
 	return nil
+}
+
+// hasCertHashIndex reports whether the archive month at archivePath still carries
+// the cert_hash unique index — i.e. it has not yet been migrated to the
+// index-free append-only heap.
+func hasCertHashIndex(archivePath string) (bool, error) {
+	d, err := sql.Open("sqlite", "file:"+archivePath+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		return false, fmt.Errorf("open archive for index check: %w", err)
+	}
+	defer d.Close()
+	var name string
+	err = d.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_subjects_cert_hash'`,
+	).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query archive indexes: %w", err)
+	}
+	return true, nil
+}
+
+// migrateMonthToAppendOnly rebuilds the archive month at archivePath as the
+// index-free append-only heap (only the tile_entry unique index), via a
+// sequential scratch rebuild — see buildIndexFreeHeap. It exists so the first
+// flush of a pre-existing, fully-indexed month does NOT pay the in-place DROP of
+// the giant cert_hash index on the HDD (~37 min random-seek wall on an 11 GB
+// month). scratchDir (the SSD) holds the rebuild; "" builds adjacent to the
+// archive. The archive is atomically replaced only once the new heap is built.
+func migrateMonthToAppendOnly(archivePath, scratchDir string) error {
+	return scratchRebuildArchive(archivePath, scratchDir, "migrate", func(buildPath string) error {
+		return buildIndexFreeHeap(archivePath, buildPath)
+	})
 }
 
 // SealMonth makes an archive month query-ready and duplicate-free after a series
