@@ -90,14 +90,42 @@ per (pool × month) rollover.
 Dedup pre-filter dropped 519K of 784K pool rows (66% cross-log overlap); SEAL
 compacted 9 transient dups; quick_check ok.
 
+## Bootstrap playbook (validated live 2026-06-09)
+
+A heavy bootstrap touches every archive month, so the FIRST flush of each
+pre-existing (still-indexed) giant month triggers its one-time migration. Letting
+those migrations stack against full-speed ingestion spikes SSD (observed: 38→16 GB
+in ~30 min, forcing a pause). So migrate up front, offline:
+
+1. `tools/ct_stop.sh` (or stop ct-client, let the server drain, then stop ct-server).
+2. `go run ./cmd/migrate-archive --archive /Volumes/wd_office_2/datasets/CT --scratch data/active`
+   — strips every month to the index-free heap, one at a time, with full SSD
+   headroom (idempotent; already-migrated months skip instantly).
+3. `tools/ct_start.sh` — bootstrap now runs on pure sequential appends.
+4. When the bootstrap reaches the live tail of all logs, one `SealMonth` pass per
+   month rebuilds the read-path query indexes (see seal-scheduling follow-up).
+
+### Live validation (2026-06-09)
+
+- BEFORE pre-migration: first rollover migrated the giants inline; SSD 38→16 GB in
+  ~30 min; had to pause ct-client (instant 16→34 GB recovery confirmed it was
+  transient migration scratch).
+- The recovery drain itself pre-migrated the touched giants (pool 1 slow/migrating
+  ~75 min; pool 2 then drained 35→0 month-DBs in ~2.5 min as fast appends).
+- `migrate-archive` then did migrated=96 skipped=56 failed=0 (the 56 giants already
+  migrated by the drain; 96 small old months migrated in <1 s total).
+- AFTER pre-migration: bootstrap ran with `scratch=0` throughout; SSD held 29–38 GB;
+  the rollover flush drained a ~16 GB pool to ~5.7 GB in ~18 min (pure appends)
+  WHILE the next pool grew — net pool shrank, flush outpaces ingestion, no pause.
+
 ## Open follow-ups (NOT done on this branch)
 
 - **Seal scheduling for the LIVE path.** `FlushAll` now never seals, so a live
   ct-server's touched archive months progressively lose their query indexes and
-  accumulate transient dups until something seals them. Backfill is fine (seal
-  when caught up). The live server needs a seal trigger — every N rollovers, on
-  graceful shutdown, or a separate scheduled pass. Deliberately left as a
-  decision rather than wired in unilaterally.
+  accumulate transient dups until something seals them. Per the agreed plan: do
+  one big `SealMonth` pass when the bootstrap reaches the live tail of all logs,
+  then a periodic schedule TBD. Not yet wired (needs a "caught up" trigger +
+  offline/low-priority seal pass).
 - **`cert_log` semantics (the secondary finding).** The scratch rebuild in
   `SealMonth` (via `buildMergedSubjectDB`) still produces a file with no
   `cert_log` table, so a scratch seal drops the archive's `cert_log` — same as
