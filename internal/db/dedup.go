@@ -426,6 +426,34 @@ func migrateMonthToAppendOnly(archivePath, scratchDir string) error {
 	})
 }
 
+// MigrateArchiveMonth converts a pre-existing archive month at archivePath to
+// the append-only index-free heap (strips the cert_hash unique + read-path query
+// indexes) via a sequential scratch rebuild in scratchDir (the SSD), so later
+// FlushMonthDeduped appends are pure sequential writes with no per-flush index
+// work. Idempotent: returns migrated=false (a no-op) if the month is already
+// index-free.
+//
+// Intended for a one-time OFFLINE pass over every archive month BEFORE a heavy
+// bootstrap, so the per-month migration cost (and its ~month-sized scratch spike)
+// is paid once with full SSD headroom instead of stacking up against live
+// ingestion. The caller MUST ensure no other process writes the archive
+// (ct-server stopped): archiveFlushMu only serialises writers within one process.
+func MigrateArchiveMonth(archivePath, scratchDir string) (migrated bool, err error) {
+	archiveFlushMu.Lock()
+	defer archiveFlushMu.Unlock()
+	has, err := hasCertHashIndex(archivePath)
+	if err != nil {
+		return false, err
+	}
+	if !has {
+		return false, nil
+	}
+	if err := migrateMonthToAppendOnly(archivePath, scratchDir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // SealMonth makes an archive month query-ready and duplicate-free after a series
 // of append-only flushes (FlushMonthDeduped). The append path leaves the month
 // as a heap with no cert_hash unique index and no read-path query indexes, and
