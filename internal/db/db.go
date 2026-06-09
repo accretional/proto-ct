@@ -394,6 +394,25 @@ func buildMergedSubjectDB(existingPath, srcPath, newPath string) error {
 	return nil
 }
 
+// queryIndexStmts builds the read-path indexes. They are created after bulk
+// ingestion (never maintained per-row during a write-only load), so the B2
+// in-place append can drop them, append with only the unique dedup indexes
+// resident, and rebuild them once via an efficient sort.
+var queryIndexStmts = []string{
+	`CREATE INDEX IF NOT EXISTS idx_subjects_ca_id     ON subjects(ca_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_subjects_cn        ON subjects(common_name)`,
+	`CREATE INDEX IF NOT EXISTS idx_subjects_not_after ON subjects(not_after)`,
+	`CREATE INDEX IF NOT EXISTS idx_subjects_wildcard  ON subjects(is_wildcard)`,
+}
+
+// queryIndexNames are the same indexes as queryIndexStmts, for DROP INDEX.
+var queryIndexNames = []string{
+	"idx_subjects_ca_id",
+	"idx_subjects_cn",
+	"idx_subjects_not_after",
+	"idx_subjects_wildcard",
+}
+
 // BuildQueryIndexes creates the read-oriented indexes on a subjects.db that was
 // opened for write-only ingestion. Call this on the SSD copy before archiving.
 func BuildQueryIndexes(path string) error {
@@ -405,12 +424,7 @@ func BuildQueryIndexes(path string) error {
 	if _, err := db.Exec(`PRAGMA synchronous=OFF; PRAGMA cache_size=-524288;`); err != nil {
 		return err
 	}
-	for _, stmt := range []string{
-		`CREATE INDEX IF NOT EXISTS idx_subjects_ca_id     ON subjects(ca_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_subjects_cn        ON subjects(common_name)`,
-		`CREATE INDEX IF NOT EXISTS idx_subjects_not_after ON subjects(not_after)`,
-		`CREATE INDEX IF NOT EXISTS idx_subjects_wildcard  ON subjects(is_wildcard)`,
-	} {
+	for _, stmt := range queryIndexStmts {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("create index: %w", err)
 		}
@@ -567,13 +581,6 @@ func (p *SubjectDBPool) InsertBatch(subjects []Subject) error {
 	return nil
 }
 
-// incrementalMergeThreshold is the active DB size below which FlushAll uses a
-// direct INSERT OR IGNORE into the archive rather than a full rebuild. For
-// live incremental ingestion (small active DBs), direct insert is fast and
-// causes negligible B-tree fragmentation. For historical bulk ingestion (large
-// active DBs), MergeSubjectDBs rebuilds the archive from scratch to keep pages
-// contiguous and avoid read-path degradation.
-const incrementalMergeThreshold = 256 << 20 // 256 MiB
 
 // archiveFlushMu serializes ALL writes into the shared HDD archive across the
 // whole process. Two FlushAll passes (e.g. the hourly rollover flush and the
@@ -584,13 +591,15 @@ const incrementalMergeThreshold = 256 << 20 // 256 MiB
 var archiveFlushMu sync.Mutex
 
 // FlushAll checkpoints and closes every open DB, then merges each into
-// archiveRoot/YYYY-MM/subjects.db using the most appropriate strategy:
+// archiveRoot/YYYY-MM/subjects.db:
 //
-//   - Archive doesn't exist: copy active file across, build query indexes.
-//   - Active < 256 MiB:      INSERT OR IGNORE directly into archive (fast,
-//     minimal fragmentation for small incremental batches).
-//   - Active >= 256 MiB:     full rebuild via MergeSubjectDBs (prevents B-tree
-//     fragmentation after large bulk ingestion runs).
+//   - Archive doesn't exist: build query indexes on the active file, copy it
+//     across as the new month, and seed the SSD dedup set from it.
+//   - Archive exists: append-only deduped flush (FlushMonthDeduped) — pre-filter
+//     the active rows against the SSD dedup set and sequentially append only the
+//     new ones (O(new rows)). No O(archive-month) rebuild and no SSD scratch per
+//     flush. Compaction + read-path index rebuild are deferred to SealMonth, run
+//     rarely (a caught-up month / end of a bulk drain), not on every rollover.
 //
 // All months are attempted regardless of individual errors; the first error
 // encountered is returned.
@@ -600,6 +609,9 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var firstErr error
+	// Per-month cert_hash dedup sets live on the SSD next to the active root and
+	// persist across pools/sessions (they mirror the archive months).
+	dedupDir := filepath.Join(filepath.Dir(filepath.Clean(p.activeDir)), "dedup")
 	for month, sdb := range p.dbs {
 		if err := sdb.CheckpointAndClose(); err != nil {
 			log.Printf("pool: checkpoint %s: %v", month, err)
@@ -617,27 +629,36 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 			continue
 		}
 
+		dedupPath := dedupPathFor(dedupDir, month)
 		var mergeErr error
 		if _, statErr := os.Stat(archivePath); os.IsNotExist(statErr) {
 			// New partition: build the query indexes on the SSD active file
-			// (random work stays off the HDD), then copy it across as the
-			// archive month.
+			// (random work stays off the HDD), copy it across as the archive
+			// month, then seed the SSD dedup set from it.
 			if err := BuildQueryIndexes(activePath); err != nil {
 				log.Printf("pool: build indexes %s: %v", month, err)
 			}
 			mergeErr = copySubjectDB(activePath, archivePath)
-		} else {
-			fi, _ := os.Stat(activePath)
-			if fi != nil && fi.Size() < incrementalMergeThreshold {
-				// Small incremental batch: insert directly, no rebuild.
-				mergeErr = mergeSubjectDBsDirect(activePath, archivePath)
-			} else {
-				// Large bulk flush: rebuild via the SSD scratch dir so the
-				// cert_hash random-probe I/O lands on the SSD, not the HDD
-				// (the ~1 MB/s wall). Query indexes are built in the same
-				// scratch pass, so no separate BuildQueryIndexes here.
-				mergeErr = MergeSubjectDBsScratch(activePath, archivePath, p.activeDir)
+			if mergeErr == nil {
+				if ds, e := OpenDedupStore(dedupPath); e != nil {
+					log.Printf("pool: open dedup %s: %v", month, e)
+				} else {
+					if _, e := ds.PopulateFromArchive(archivePath); e != nil {
+						log.Printf("pool: seed dedup %s: %v", month, e)
+					}
+					ds.Close()
+				}
 			}
+		} else {
+			// Existing partition: append-only deduped flush. Pre-filter the pool's
+			// rows against the SSD dedup set and sequentially append only the new
+			// ones (O(new rows)), leaving the archive's cert_hash + query indexes
+			// dropped — no O(archive-month) rebuild per flush and no SSD scratch
+			// headroom needed. Compaction + index rebuild are deferred to SealMonth,
+			// run rarely (caught-up month / end of a bulk drain), not on every
+			// rollover. Only the first flush of a pre-existing month pays a one-time
+			// O(month) DROP of its old cert_hash index; every flush after is fast.
+			mergeErr = FlushMonthDeduped(activePath, archivePath, dedupPath)
 		}
 		if mergeErr != nil {
 			log.Printf("pool: flush %s: %v", month, mergeErr)
@@ -653,29 +674,6 @@ func (p *SubjectDBPool) FlushAll(archiveRoot string) error {
 	}
 	p.dbs = make(map[string]*SubjectDB)
 	return firstErr
-}
-
-// mergeSubjectDBsDirect inserts all rows from srcPath into dstPath using
-// INSERT OR IGNORE, skipping duplicates on (tile_idx, entry_idx). Used for
-// small incremental flushes where a full rebuild would be disproportionately
-// expensive.
-func mergeSubjectDBsDirect(srcPath, dstPath string) error {
-	dst, err := sql.Open("sqlite", dstPath)
-	if err != nil {
-		return fmt.Errorf("open dst for direct merge: %w", err)
-	}
-	defer dst.Close()
-	dst.SetMaxOpenConns(1)
-	dst.Exec(`PRAGMA synchronous=OFF; PRAGMA cache_size=-524288;`) //nolint:errcheck
-	if _, err := dst.Exec(fmt.Sprintf(`ATTACH '%s' AS src`, srcPath)); err != nil {
-		return fmt.Errorf("attach src for direct merge: %w", err)
-	}
-	if _, err := dst.Exec(`INSERT OR IGNORE INTO subjects (` + subjectCols + `)
-		SELECT ` + subjectCols + ` FROM src.subjects`); err != nil {
-		return fmt.Errorf("direct merge insert: %w", err)
-	}
-	_, err = dst.Exec(`DETACH src`)
-	return err
 }
 
 // CloseAll closes all open DBs without merging. Used on error paths where the

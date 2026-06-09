@@ -5,7 +5,10 @@
 #
 # Depends on the local DNS stack (the proto-domain server). The script
 # auto-starts it via tools/start_dns_stack.sh — opt out with SKIP_STACK=1
-# if you're managing it externally.
+# if you're managing it externally. While it manages the stack it also runs a
+# background watchdog that restarts the resolver if it dies (otherwise a dead
+# resolver silently 100%-errors until the shard finishes). Disable with
+# WATCHDOG=0.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,8 +27,27 @@ QPS="${QPS:-500}"
 TIMEOUT="${TIMEOUT:-8s}"
 START_FROM="${START_FROM:-}"  # skip shards before this label
 SKIP_STACK="${SKIP_STACK:-}"  # set to 1 to skip auto-bringup of proto-domain
+WATCHDOG="${WATCHDOG:-1}"      # set to 0 to disable the proto-domain self-heal watchdog
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-30}"  # seconds between resolver liveness checks
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+# dns_watchdog re-checks the proto-domain resolver (:50098) every
+# WATCHDOG_INTERVAL seconds and re-runs start_dns_stack.sh (idempotent) if it's
+# down, so a resolver death self-heals instead of silently 100%-erroring.
+dns_watchdog() {
+  while true; do
+    sleep "$WATCHDOG_INTERVAL"
+    if ! (echo >/dev/tcp/127.0.0.1/50098) >/dev/null 2>&1; then
+      log "WATCHDOG: proto-domain (:50098) down — restarting via start_dns_stack.sh"
+      if bash "$REPO/tools/start_dns_stack.sh" >/dev/null 2>&1; then
+        log "WATCHDOG: proto-domain back up"
+      else
+        log "WATCHDOG: start_dns_stack.sh failed — retrying in ${WATCHDOG_INTERVAL}s"
+      fi
+    fi
+  done
+}
 
 # Map "tld/bucket" → final DB path (mirrors dbName() in store.go).
 final_db() {
@@ -79,6 +101,12 @@ mkdir -p "$HDD_DNS" "$REPO/data/logs"
 
 if [ -z "$SKIP_STACK" ]; then
   bash "$REPO/tools/start_dns_stack.sh"
+  if [ "$WATCHDOG" != "0" ]; then
+    dns_watchdog &
+    WATCHDOG_PID=$!
+    trap '[ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null' EXIT
+    log "proto-domain self-heal watchdog started (pid $WATCHDOG_PID, every ${WATCHDOG_INTERVAL}s)"
+  fi
 fi
 
 started=false

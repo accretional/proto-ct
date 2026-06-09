@@ -44,6 +44,12 @@ func main() {
 		log.Fatalf("ct-server appears to be running (pids %v) — stop it before re-merging; aborting", pids)
 	}
 
+	// Bulk drain: each per-pool, per-month flush is now an append-only
+	// FlushMonthDeduped (O(new rows), no index rebuild). The O(month) compaction
+	// + query-index build is done once per touched month at the very end via
+	// SealMonth — by which point the pool dirs are drained and the SSD has room
+	// for the seal's scratch rebuild, so the giant months never hit the
+	// scratch-headroom wall mid-drain.
 	pools, err := listPools(*activeDir)
 	if err != nil {
 		log.Fatalf("list pools: %v", err)
@@ -53,6 +59,7 @@ func main() {
 		return
 	}
 
+	touched := map[string]bool{}
 	var totalMonths, totalFailed int
 	for _, pool := range pools {
 		if *onlyPool != "" && pool != *onlyPool {
@@ -90,6 +97,7 @@ func main() {
 			}
 			log.Printf("  [%s/%s] flushed (%.0f MiB) in %s; SSD %sG free",
 				pool, m, sizeMB, took(start), ssdFreeGB(*activeDir))
+			touched[m] = true
 			totalMonths++
 		}
 		// Drop the pool dir if fully drained.
@@ -99,6 +107,30 @@ func main() {
 			}
 		}
 	}
+
+	// Seal each touched month once at the end: compact any transient duplicates
+	// the append path left behind and (re)build the cert_hash unique + read-path
+	// query indexes. The scratch rebuild runs on the SSD active dir; pools are
+	// drained by now so there is room even for the giant months.
+	if !*dryRun && len(touched) > 0 {
+		months := make([]string, 0, len(touched))
+		for m := range touched {
+			months = append(months, m)
+		}
+		sort.Strings(months)
+		log.Printf("sealing %d touched month(s)", len(months))
+		for _, m := range months {
+			archivePath := filepath.Join(*archiveDir, m, "subjects.db")
+			start := time.Now()
+			if err := db.SealMonth(archivePath, *activeDir); err != nil {
+				log.Printf("  [%s] seal: %v", m, err)
+				totalFailed++
+				continue
+			}
+			log.Printf("  [%s] sealed in %s; SSD %sG free", m, took(start), ssdFreeGB(*activeDir))
+		}
+	}
+
 	log.Printf("remerge-pools done: months flushed=%d failed=%d", totalMonths, totalFailed)
 	if totalFailed > 0 {
 		os.Exit(1)
