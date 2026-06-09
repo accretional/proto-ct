@@ -92,7 +92,7 @@ func defaultQPS(lg ctlist.Log) float64 {
 
 // IngestAll fans out one worker per usable log in the catalog and streams
 // per-log heartbeat events. It is independent of IngestLog and writes through
-// the new cert_hash / cert_log / log_runs schema.
+// the new cert_hash / log_runs schema.
 func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionService_IngestAllServer) error {
 	ctx := stream.Context()
 	// Fold the server-wide shutdown signal into the worker context so a SIGTERM
@@ -393,11 +393,10 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 			log.Printf("%s: prefetch issuers cursor=%d: %v", shortDesc(lg), cursor, err)
 		}
 
-		// Build subject + cert_log batches grouped by NotBefore month.
+		// Build subject batches grouped by NotBefore month.
 		byMonth := make(map[string]*monthBatch)
-		seenAt := time.Now().Unix()
 		for _, leaf := range leaves {
-			subject, certHash, err := processLogLeaf(leaf, lg.LogID, issuerCache)
+			subject, err := processLogLeaf(leaf, lg.LogID, issuerCache)
 			if err != nil {
 				log.Printf("%s entry=%d skip: %v", shortDesc(lg), leaf.EntryIdx, err)
 				continue
@@ -409,12 +408,6 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 				byMonth[month] = b
 			}
 			b.subjects = append(b.subjects, subject)
-			b.certLog = append(b.certLog, db.CertLogEntry{
-				LogID:    lg.LogID[:],
-				EntryIdx: leaf.EntryIdx,
-				CertHash: certHash[:],
-				SeenAt:   seenAt,
-			})
 		}
 		// Load the current pool. The rollover coordinator may swap it out
 		// from under us between iterations; loading here lets the swap take
@@ -428,9 +421,6 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 			}
 			if err := sdb.InsertSubjectBatch(batch.subjects); err != nil {
 				log.Printf("%s insert subjects month=%s: %v", shortDesc(lg), month, err)
-			}
-			if err := sdb.InsertCertLogBatch(batch.certLog); err != nil {
-				log.Printf("%s insert cert_log month=%s: %v", shortDesc(lg), month, err)
 			}
 		}
 
@@ -450,7 +440,6 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 
 type monthBatch struct {
 	subjects []db.Subject
-	certLog  []db.CertLogEntry
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -514,12 +503,11 @@ func monthKey(notBefore string) string {
 // ── log-leaf processing (multi-log) ───────────────────────────────────────
 
 // processLogLeaf builds a db.Subject populated with cert_hash + log_id for
-// the multi-log dedup path, and returns the cert_hash separately so the
-// caller can write the matching cert_log provenance row.
-func processLogLeaf(leaf *ctlog.LogLeaf, logID [32]byte, cache map[[32]byte]*issuerInfo) (db.Subject, [32]byte, error) {
+// the multi-log dedup path.
+func processLogLeaf(leaf *ctlog.LogLeaf, logID [32]byte, cache map[[32]byte]*issuerInfo) (db.Subject, error) {
 	cert, err := parseCertLogLeaf(leaf)
 	if err != nil {
-		return db.Subject{}, [32]byte{}, fmt.Errorf("parse cert: %w", err)
+		return db.Subject{}, fmt.Errorf("parse cert: %w", err)
 	}
 	var info *issuerInfo
 	if len(leaf.ChainFingerprints) > 0 {
@@ -580,7 +568,7 @@ func processLogLeaf(leaf *ctlog.LogLeaf, logID [32]byte, cache map[[32]byte]*iss
 		CertHash:     certHash[:],
 		LogID:        logID[:],
 	}
-	return subject, certHash, nil
+	return subject, nil
 }
 
 // parseCertLogLeaf is the LogLeaf-shaped twin of parseCert (TileLeaf-based).

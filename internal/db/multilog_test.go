@@ -1,7 +1,6 @@
 package db
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
@@ -554,7 +553,7 @@ func TestSubjectDB_CertHashDedup(t *testing.T) {
 	logA := sha256.Sum256([]byte("log-A"))
 	logB := sha256.Sum256([]byte("log-B"))
 
-	// Same cert from two different logs — only one subjects row, two cert_log rows.
+	// Same cert from two different logs — only one subjects row (cross-log dedup).
 	subj := Subject{
 		CAID: 1, SerialNumber: "01", CommonName: "example.com",
 		NotBefore: "2026-05-01", NotAfter: "2026-08-01",
@@ -576,46 +575,6 @@ func TestSubjectDB_CertHashDedup(t *testing.T) {
 	}
 	if subjectsCount != 1 {
 		t.Errorf("expected 1 subject row after dedup, got %d", subjectsCount)
-	}
-
-	// Record provenance in cert_log.
-	entries := []CertLogEntry{
-		{LogID: logA[:], EntryIdx: 100, CertHash: certHash[:], SeenAt: 1700000000},
-		{LogID: logB[:], EntryIdx: 200, CertHash: certHash[:], SeenAt: 1700000001},
-		// Duplicate (log, entry) — must be ignored.
-		{LogID: logA[:], EntryIdx: 100, CertHash: certHash[:], SeenAt: 1700000002},
-	}
-	if err := sdb.InsertCertLogBatch(entries); err != nil {
-		t.Fatalf("InsertCertLogBatch: %v", err)
-	}
-
-	var clCount int
-	if err := sdb.db.QueryRow(`SELECT COUNT(*) FROM cert_log`).Scan(&clCount); err != nil {
-		t.Fatal(err)
-	}
-	if clCount != 2 {
-		t.Errorf("expected 2 cert_log rows after dedup, got %d", clCount)
-	}
-
-	// Verify lookup by cert_hash returns both logs.
-	rows, err := sdb.db.Query(`SELECT log_id FROM cert_log WHERE cert_hash = ? ORDER BY entry_idx`, certHash[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var seenLogs [][]byte
-	for rows.Next() {
-		var b []byte
-		if err := rows.Scan(&b); err != nil {
-			t.Fatal(err)
-		}
-		seenLogs = append(seenLogs, b)
-	}
-	if len(seenLogs) != 2 {
-		t.Errorf("expected 2 logs for cert_hash, got %d", len(seenLogs))
-	}
-	if !bytes.Equal(seenLogs[0], logA[:]) || !bytes.Equal(seenLogs[1], logB[:]) {
-		t.Errorf("log_id ordering wrong: %x then %x", seenLogs[0], seenLogs[1])
 	}
 }
 

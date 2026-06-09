@@ -56,15 +56,6 @@ type Subject struct {
 	LogID    []byte // canonical log identity; 32 bytes when set, nil otherwise
 }
 
-// CertLogEntry records that a leaf with cert_hash was observed in log_id at entry_idx.
-// One subjects row + N cert_log rows represent the same cert appearing in N logs.
-type CertLogEntry struct {
-	LogID    []byte // 32 bytes
-	EntryIdx int64  // global index within the log
-	CertHash []byte // 32 bytes
-	SeenAt   int64  // unix epoch seconds
-}
-
 // OpenIssuerDB opens or creates the issuer database at path.
 func OpenIssuerDB(path string) (*IssuerDB, error) {
 	db, err := sql.Open("sqlite", path)
@@ -216,21 +207,9 @@ func OpenSubjectDB(path string) (*SubjectDB, error) {
 		log.Printf("warn: %s: idx_subjects_cert_hash not enforced (existing duplicate keys?): %v", path, err)
 	}
 
-	// Per-log provenance: tracks where each cert was seen. PK (log_id, entry_idx)
-	// makes resume idempotent — re-fetching an entry is a no-op insert.
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS cert_log (
-			log_id    BLOB    NOT NULL,
-			entry_idx INTEGER NOT NULL,
-			cert_hash BLOB    NOT NULL,
-			seen_at   INTEGER NOT NULL,
-			PRIMARY KEY (log_id, entry_idx)
-		) WITHOUT ROWID;
-	`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("create cert_log: %w", err)
-	}
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cert_log_hash ON cert_log(cert_hash)`) //nolint:errcheck
+	// Note: the legacy per-log provenance table cert_log is no longer created or
+	// written. Existing months still carrying it shed it naturally on the next
+	// migration/seal rebuild (which copies only the subjects table).
 
 	return &SubjectDB{db: db}, nil
 }
@@ -569,32 +548,6 @@ func (sdb *SubjectDB) InsertSubjectBatch(subjects []Subject) error {
 			certHash, logID,
 		); err != nil {
 			return fmt.Errorf("insert subject tile=%d entry=%d: %w", s.TileIdx, s.EntryIdx, err)
-		}
-	}
-	return tx.Commit()
-}
-
-// InsertCertLogBatch records per-log provenance for a batch of (log_id, entry_idx, cert_hash)
-// observations in a single transaction. Duplicate (log_id, entry_idx) rows are silently ignored.
-func (sdb *SubjectDB) InsertCertLogBatch(entries []CertLogEntry) error {
-	if len(entries) == 0 {
-		return nil
-	}
-	tx, err := sdb.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin cert_log batch: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	stmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO cert_log (log_id, entry_idx, cert_hash, seen_at)
-		VALUES (?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare cert_log insert: %w", err)
-	}
-	defer stmt.Close()
-	for _, e := range entries {
-		if _, err := stmt.Exec(e.LogID, e.EntryIdx, e.CertHash, e.SeenAt); err != nil {
-			return fmt.Errorf("insert cert_log entry=%d: %w", e.EntryIdx, err)
 		}
 	}
 	return tx.Commit()

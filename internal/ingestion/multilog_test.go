@@ -191,14 +191,11 @@ func TestRunLogWorker_RFC6962_WritesRows(t *testing.T) {
 	}
 	defer conn.Close()
 
-	var subjectsCount, certLogCount, withHashCount int
+	var subjectsCount, withHashCount int
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM subjects`).Scan(&subjectsCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM subjects WHERE cert_hash IS NOT NULL`).Scan(&withHashCount); err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM cert_log`).Scan(&certLogCount); err != nil {
 		t.Fatal(err)
 	}
 	if subjectsCount != 3 {
@@ -206,9 +203,6 @@ func TestRunLogWorker_RFC6962_WritesRows(t *testing.T) {
 	}
 	if withHashCount != 3 {
 		t.Errorf("expected all 3 subjects to have cert_hash, got %d", withHashCount)
-	}
-	if certLogCount != 3 {
-		t.Errorf("expected 3 cert_log rows, got %d", certLogCount)
 	}
 
 	// log_runs should record the run with the right counters.
@@ -236,7 +230,7 @@ func TestRunLogWorker_RFC6962_WritesRows(t *testing.T) {
 
 func TestRunLogWorker_RFC6962_DedupAcrossLogs(t *testing.T) {
 	// Same cert appearing in two different "logs" — verifies cert_hash dedup
-	// in subjects + per-log provenance in cert_log.
+	// in subjects (one row regardless of how many logs carry the cert).
 	notBefore := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
 	notAfter := notBefore.AddDate(0, 3, 0)
 	cert := mintTestCert(t, "shared.example.com", notBefore, notAfter)
@@ -308,14 +302,10 @@ func TestRunLogWorker_RFC6962_DedupAcrossLogs(t *testing.T) {
 	conn, _ := sql.Open("sqlite", monthDB)
 	defer conn.Close()
 
-	var subjectsCount, certLogCount int
+	var subjectsCount int
 	_ = conn.QueryRow(`SELECT COUNT(*) FROM subjects`).Scan(&subjectsCount)
-	_ = conn.QueryRow(`SELECT COUNT(*) FROM cert_log`).Scan(&certLogCount)
 	if subjectsCount != 1 {
 		t.Errorf("expected 1 deduped subjects row, got %d", subjectsCount)
-	}
-	if certLogCount != 2 {
-		t.Errorf("expected 2 cert_log provenance rows, got %d", certLogCount)
 	}
 }
 
