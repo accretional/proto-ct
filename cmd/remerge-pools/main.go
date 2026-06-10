@@ -38,6 +38,7 @@ func main() {
 	archiveDir := flag.String("archive", "/Volumes/wd_office_2/datasets/CT", "HDD archive root (<YYYY-MM>/subjects.db)")
 	onlyPool := flag.String("pool", "", "only process this single pool dir name")
 	dryRun := flag.Bool("dry-run", false, "list the work, then exit without flushing")
+	noSeal := flag.Bool("no-seal", false, "append only; skip the final per-month SealMonth (keeps months index-free for an ongoing append-only bootstrap — the seal-at-tail pass rebuilds indexes later)")
 	flag.Parse()
 
 	if pids := pgrep("ct-server"); len(pids) > 0 {
@@ -112,7 +113,15 @@ func main() {
 	// the append path left behind and (re)build the cert_hash unique + read-path
 	// query indexes. The scratch rebuild runs on the SSD active dir; pools are
 	// drained by now so there is room even for the giant months.
-	if !*dryRun && len(touched) > 0 {
+	//
+	// --no-seal skips this: when draining into an archive that an append-only
+	// bootstrap is still using, re-indexing a month would force the next live
+	// flush to re-migrate it. Leave the months index-free; the seal-at-tail pass
+	// rebuilds indexes for everything once the bootstrap is caught up.
+	if *noSeal && !*dryRun && len(touched) > 0 {
+		log.Printf("--no-seal: leaving %d touched month(s) index-free (seal deferred to the tail pass)", len(touched))
+	}
+	if !*noSeal && !*dryRun && len(touched) > 0 {
 		months := make([]string, 0, len(touched))
 		for m := range touched {
 			months = append(months, m)
