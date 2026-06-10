@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/benfultz/proto-ct/internal/dashboard"
 )
@@ -31,6 +32,12 @@ type shardState struct {
 	errs    int64
 	cbState string
 	status  string // "running" | "complete" | "finalized" | "interrupted"
+	// lastMetricAt is the timestamp parsed from the most recent
+	// "metrics:" line in the per-shard log. Zero means the log was
+	// empty or had no metrics. Used to disambiguate which shard is
+	// actually running when runner.log accumulates stale "===" markers
+	// across runner restarts.
+	lastMetricAt time.Time
 }
 
 type dnsfetchPanel struct {
@@ -193,6 +200,14 @@ func parseShardLogFile(path string) shardState {
 				sh.errs, _ = strconv.ParseInt(m[6], 10, 64)
 				sh.cbState = m[7]
 			}
+			// Capture the leading "YYYY/MM/DD HH:MM:SS" timestamp so
+			// parseShardLogs can disambiguate concurrent "running"
+			// entries by last-seen metric time.
+			if len(line) >= 19 {
+				if t, err := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local); err == nil {
+					sh.lastMetricAt = t
+				}
+			}
 		case strings.Contains(line, "feed:"):
 			if sh.total == 0 {
 				if m := reFeed.FindStringSubmatch(line); m != nil {
@@ -215,9 +230,12 @@ func parseShardLogFile(path string) shardState {
 
 func parseShardLogs(logsDir string) (current *shardState, history []shardState) {
 	entries := parseRunnerLog(filepath.Join(logsDir, "runner.log"))
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		sh := parseShardLogFile(filepath.Join(logsDir, strings.ReplaceAll(e.key, "/", "-")+".log"))
+
+	parsed := make([]shardState, len(entries))
+	mtimes := make([]time.Time, len(entries))
+	for i, e := range entries {
+		path := filepath.Join(logsDir, strings.ReplaceAll(e.key, "/", "-")+".log")
+		sh := parseShardLogFile(path)
 		sh.key = e.key
 		if e.total > 0 && sh.total == 0 {
 			sh.total = e.total
@@ -225,10 +243,58 @@ func parseShardLogs(logsDir string) (current *shardState, history []shardState) 
 		if e.status == "complete" && sh.status == "running" {
 			sh.status = "complete"
 		}
-		if current == nil && sh.status == "running" {
-			shCopy := sh
+		parsed[i] = sh
+		if st, err := os.Stat(path); err == nil {
+			mtimes[i] = st.ModTime()
+		}
+	}
+
+	// Pick "current" as the running entry whose log shows the most
+	// recent metrics-line timestamp — the only signal that proves a
+	// dnsfetch process is actively writing to it. runner.log alone
+	// isn't enough: when an SIGINT'd run looks like a clean exit, the
+	// runner script emits "=== done X ===" and loop-spawns the next
+	// shard before being killed too, leaving both the previous and
+	// the next shard with "running" markers in runner.log.
+	bestIdx := -1
+	var bestTime time.Time
+	for i, sh := range parsed {
+		if sh.status != "running" || sh.lastMetricAt.IsZero() {
+			continue
+		}
+		if sh.lastMetricAt.After(bestTime) {
+			bestTime = sh.lastMetricAt
+			bestIdx = i
+		}
+	}
+	// Fallback for brand-new shards (process just started, no metrics
+	// line yet): pick the running entry whose log file mtime is most
+	// recent. The active tee'd-into file gets touched on every flush.
+	if bestIdx == -1 {
+		for i, sh := range parsed {
+			if sh.status != "running" {
+				continue
+			}
+			if mtimes[i].After(bestTime) {
+				bestTime = mtimes[i]
+				bestIdx = i
+			}
+		}
+	}
+
+	for i := len(parsed) - 1; i >= 0; i-- {
+		if i == bestIdx {
+			shCopy := parsed[i]
 			current = &shCopy
 		} else {
+			sh := parsed[i]
+			// A "running" entry that isn't the active one was started
+			// in some earlier runner pass and never finished — its
+			// dnsfetch process is gone. Show it as interrupted, not as
+			// completed (the default ✓ icon would be misleading).
+			if sh.status == "running" {
+				sh.status = "interrupted"
+			}
 			history = append(history, sh)
 		}
 	}

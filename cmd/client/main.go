@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	pb "github.com/benfultz/proto-ct/gen/ctingestion/v1"
@@ -15,15 +16,26 @@ import (
 )
 
 var (
-	serverAddr  = flag.String("addr", "localhost:50051", "server address")
+	serverAddr     = flag.String("addr", "localhost:50051", "server address")
 	monitoringRoot = flag.String("root", "https://mon.sycamore.ct.letsencrypt.org/2026h1/tile/data/", "monitoring API root (tile/data/ endpoint)")
-	batchSize   = flag.Int64("batch", 1000, "entries to mirror this session (ignored when --continuous is set)")
-	activeDir   = flag.String("out", "data/active/", "active staging dir (fast local SSD); dated subdirs are written here")
-	archiveDir  = flag.String("archive", "/Volumes/wd_office_2/datasets/CT/", "persistent archive dir; receives completed dated dirs on rollover, holds progress.db")
-	targetQPS   = flag.Float64("qps", 500, "target QPS to monitoring endpoint (actual = 80%); 0 = unlimited")
-	checkMode   = flag.Bool("check", false, "run a one-shot metrics check instead of ingesting")
-	continuous  = flag.Bool("continuous", false, "mirror until fully caught up with the live log (no batch limit)")
-	sizeLimit   = flag.Int64("size-limit", 50, "roll over active DB to archive when subjects.db reaches this size in GiB (0 = disabled)")
+	batchSize      = flag.Int64("batch", 1000, "entries to mirror this session (ignored when --continuous is set)")
+	activeDir      = flag.String("out", "data/active/", "active staging dir (fast local SSD); dated subdirs are written here")
+	archiveDir     = flag.String("archive", "/Volumes/wd_office_2/datasets/CT/", "persistent archive dir; receives completed dated dirs on rollover, holds progress.db")
+	targetQPS      = flag.Float64("qps", 500, "target QPS to monitoring endpoint (actual = 80%); 0 = unlimited")
+	checkMode      = flag.Bool("check", false, "run a one-shot metrics check instead of ingesting")
+	continuous     = flag.Bool("continuous", false, "mirror until fully caught up with the live log (no batch limit)")
+	sizeLimit      = flag.Int64("size-limit", 50, "roll over active DB to archive when subjects.db reaches this size in GiB (0 = disabled)")
+
+	// IngestAll (multi-log) mode flags.
+	allMode             = flag.Bool("all", false, "run multi-log ingestion across every usable CT log in the gstatic v3 log_list")
+	logListURL          = flag.String("log-list", "", "log_list.json URL (empty = gstatic v3 default)")
+	protocols           = flag.String("protocols", "", "comma-separated protocol filter for --all (e.g. 'static-ct-api,rfc6962'); empty = both")
+	operators           = flag.String("operators", "", "comma-separated operator filter for --all (e.g. \"Let's Encrypt,Google\"); empty = all")
+	excludeOperators    = flag.String("exclude-operators", "", "comma-separated operators to exclude from --all (e.g. \"Geomys\")")
+	descContains        = flag.String("desc-contains", "", "only logs whose description contains this substring (e.g. '2026h1')")
+	perLogQPS           = flag.Float64("per-log-qps", 0, "target QPS per log under --all; 0 = protocol default (static=20, rfc6962=10)")
+	batchSizePerLog     = flag.Int64("batch-per-log", 0, "entries-per-log cap for --all (0 = run until each log is caught up)")
+	progressEvery       = flag.Int64("progress-every", 10000, "emit a LogProgress event every N entries per log")
 )
 
 func main() {
@@ -46,7 +58,73 @@ func main() {
 	// Ingest mode: no deadline — jobs can run for many hours.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if *allMode {
+		runIngestAll(ctx, client)
+		return
+	}
 	runIngest(ctx, client)
+}
+
+func runIngestAll(ctx context.Context, client pb.CTIngestionServiceClient) {
+	req := &pb.IngestAllRequest{
+		LogListUrl:          *logListURL,
+		Protocols:           splitCSV(*protocols),
+		Operators:           splitCSV(*operators),
+		ExcludedOperators:   splitCSV(*excludeOperators),
+		DescriptionContains: *descContains,
+		PerLogQps:           *perLogQPS,
+		BatchSizePerLog:     *batchSizePerLog,
+		OutputDir:           *activeDir,
+		ArchiveDir:          *archiveDir,
+		ProgressEvery:       *progressEvery,
+	}
+	log.Printf("IngestAll: protocols=%v operators=%v desc=%q per-log-qps=%.0f batch-per-log=%d",
+		req.Protocols, req.Operators, req.DescriptionContains, req.PerLogQps, req.BatchSizePerLog)
+
+	stream, err := client.IngestAll(ctx, req)
+	if err != nil {
+		log.Fatalf("IngestAll: %v", err)
+	}
+	for {
+		ev, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("stream recv: %v", err)
+		}
+		pct := 0.0
+		if ev.TreeSize > 0 {
+			pct = float64(ev.NextEntryIdx) / float64(ev.TreeSize) * 100
+		}
+		switch ev.Status {
+		case "error":
+			log.Printf("[%s] %-40s ERROR: %s", ev.Operator, ev.Description, ev.Error)
+		case "caught_up":
+			log.Printf("[%s] %-40s CAUGHT UP at %d (tree=%d)", ev.Operator, ev.Description, ev.NextEntryIdx, ev.TreeSize)
+		case "complete":
+			log.Printf("[%s] %-40s COMPLETE session=%d total=%d", ev.Operator, ev.Description, ev.EntriesProcessed, ev.TotalProcessed)
+		default:
+			log.Printf("[%s] %-40s session=%d total=%d next=%d/%d  %.2f%%",
+				ev.Operator, ev.Description, ev.EntriesProcessed, ev.TotalProcessed, ev.NextEntryIdx, ev.TreeSize, pct)
+		}
+	}
+	log.Printf("IngestAll: stream closed")
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func runCheck(ctx context.Context, client pb.CTIngestionServiceClient) {

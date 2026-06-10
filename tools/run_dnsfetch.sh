@@ -3,9 +3,12 @@
 # Reads TSVs from HDD, stages writes on SSD, finalizes DBs to HDD_DNS.
 # Resume-safe: skips shards whose final DB already exists.
 #
-# Depends on the local DNS stack (unbound + proto-domain server). The
-# script auto-starts both via tools/start_dns_stack.sh — opt out with
-# SKIP_STACK=1 if you're managing them externally.
+# Depends on the local DNS stack (the proto-domain server). The script
+# auto-starts it via tools/start_dns_stack.sh — opt out with SKIP_STACK=1
+# if you're managing it externally. While it manages the stack it also runs a
+# background watchdog that restarts the resolver if it dies (otherwise a dead
+# resolver silently 100%-errors until the shard finishes). Disable with
+# WATCHDOG=0.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,13 +17,37 @@ DNSFETCH="$REPO/bin/dnsfetch"
 HDD_SHARDS="${HDD_SHARDS:-/Volumes/wd_office_2/datasets/CT-old/export_v2/shards}"
 HDD_DNS="${HDD_DNS:-/Volumes/wd_office_2/datasets/dns}"
 STAGING="${STAGING:-$REPO/data/dns-staging}"
-WORKERS="${WORKERS:-200}"
+# Bench knee for the 16-upstream public-resolver pool: workers=1200
+# gets ~232 dom/s; workers=800 gets ~189; workers=1600 was diminishing
+# returns + worse timeout%. QPS=500 dom/s is the cap; it doesn't bind
+# at workers=1200 but is a safety stop in case per-domain latency
+# unexpectedly drops.
+WORKERS="${WORKERS:-1200}"
 QPS="${QPS:-500}"
 TIMEOUT="${TIMEOUT:-8s}"
 START_FROM="${START_FROM:-}"  # skip shards before this label
-SKIP_STACK="${SKIP_STACK:-}"  # set to 1 to skip auto-bringup of unbound + proto-domain
+SKIP_STACK="${SKIP_STACK:-}"  # set to 1 to skip auto-bringup of proto-domain
+WATCHDOG="${WATCHDOG:-1}"      # set to 0 to disable the proto-domain self-heal watchdog
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-30}"  # seconds between resolver liveness checks
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+# dns_watchdog re-checks the proto-domain resolver (:50098) every
+# WATCHDOG_INTERVAL seconds and re-runs start_dns_stack.sh (idempotent) if it's
+# down, so a resolver death self-heals instead of silently 100%-erroring.
+dns_watchdog() {
+  while true; do
+    sleep "$WATCHDOG_INTERVAL"
+    if ! (echo >/dev/tcp/127.0.0.1/50098) >/dev/null 2>&1; then
+      log "WATCHDOG: proto-domain (:50098) down — restarting via start_dns_stack.sh"
+      if bash "$REPO/tools/start_dns_stack.sh" >/dev/null 2>&1; then
+        log "WATCHDOG: proto-domain back up"
+      else
+        log "WATCHDOG: start_dns_stack.sh failed — retrying in ${WATCHDOG_INTERVAL}s"
+      fi
+    fi
+  done
+}
 
 # Map "tld/bucket" → final DB path (mirrors dbName() in store.go).
 final_db() {
@@ -74,6 +101,12 @@ mkdir -p "$HDD_DNS" "$REPO/data/logs"
 
 if [ -z "$SKIP_STACK" ]; then
   bash "$REPO/tools/start_dns_stack.sh"
+  if [ "$WATCHDOG" != "0" ]; then
+    dns_watchdog &
+    WATCHDOG_PID=$!
+    trap '[ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null' EXIT
+    log "proto-domain self-heal watchdog started (pid $WATCHDOG_PID, every ${WATCHDOG_INTERVAL}s)"
+  fi
 fi
 
 started=false

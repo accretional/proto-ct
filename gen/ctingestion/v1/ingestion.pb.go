@@ -466,6 +466,260 @@ func (x *DbInfo) GetSizeBytes() int64 {
 	return 0
 }
 
+// IngestAllRequest configures a fan-out ingest across many CT logs.
+type IngestAllRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Where to fetch the log catalog. Empty = Google's gstatic v3 list.
+	LogListUrl string `protobuf:"bytes,1,opt,name=log_list_url,json=logListUrl,proto3" json:"log_list_url,omitempty"`
+	// Filter by protocol. Empty = both ("static-ct-api", "rfc6962").
+	Protocols []string `protobuf:"bytes,2,rep,name=protocols,proto3" json:"protocols,omitempty"`
+	// Filter by operator name. Empty = all operators.
+	Operators []string `protobuf:"bytes,3,rep,name=operators,proto3" json:"operators,omitempty"`
+	// Exclude these operators from the ingest. Applied AFTER the operators
+	// filter. Useful for skipping operators whose rate limits make them not
+	// worth the effort (e.g. Geomys at 1 QPS aggregate).
+	ExcludedOperators []string `protobuf:"bytes,10,rep,name=excluded_operators,json=excludedOperators,proto3" json:"excluded_operators,omitempty"`
+	// Optional substring match on log description (e.g. "2026h1"). Empty = no filter.
+	DescriptionContains string `protobuf:"bytes,4,opt,name=description_contains,json=descriptionContains,proto3" json:"description_contains,omitempty"`
+	// Per-log target QPS. 0 = use protocol default (Google 25, others 10).
+	PerLogQps float64 `protobuf:"fixed64,5,opt,name=per_log_qps,json=perLogQps,proto3" json:"per_log_qps,omitempty"`
+	// Entries-per-log cap for this session. 0 = run until caught up.
+	BatchSizePerLog int64 `protobuf:"varint,6,opt,name=batch_size_per_log,json=batchSizePerLog,proto3" json:"batch_size_per_log,omitempty"`
+	// Active staging directory (fast local storage).
+	OutputDir string `protobuf:"bytes,7,opt,name=output_dir,json=outputDir,proto3" json:"output_dir,omitempty"`
+	// Persistent archive directory (durable storage).
+	ArchiveDir string `protobuf:"bytes,8,opt,name=archive_dir,json=archiveDir,proto3" json:"archive_dir,omitempty"`
+	// Emit a LogProgress event every N entries per log. 0 = default (10_000).
+	ProgressEvery int64 `protobuf:"varint,9,opt,name=progress_every,json=progressEvery,proto3" json:"progress_every,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestAllRequest) Reset() {
+	*x = IngestAllRequest{}
+	mi := &file_ctingestion_v1_ingestion_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestAllRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestAllRequest) ProtoMessage() {}
+
+func (x *IngestAllRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v1_ingestion_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestAllRequest.ProtoReflect.Descriptor instead.
+func (*IngestAllRequest) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v1_ingestion_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *IngestAllRequest) GetLogListUrl() string {
+	if x != nil {
+		return x.LogListUrl
+	}
+	return ""
+}
+
+func (x *IngestAllRequest) GetProtocols() []string {
+	if x != nil {
+		return x.Protocols
+	}
+	return nil
+}
+
+func (x *IngestAllRequest) GetOperators() []string {
+	if x != nil {
+		return x.Operators
+	}
+	return nil
+}
+
+func (x *IngestAllRequest) GetExcludedOperators() []string {
+	if x != nil {
+		return x.ExcludedOperators
+	}
+	return nil
+}
+
+func (x *IngestAllRequest) GetDescriptionContains() string {
+	if x != nil {
+		return x.DescriptionContains
+	}
+	return ""
+}
+
+func (x *IngestAllRequest) GetPerLogQps() float64 {
+	if x != nil {
+		return x.PerLogQps
+	}
+	return 0
+}
+
+func (x *IngestAllRequest) GetBatchSizePerLog() int64 {
+	if x != nil {
+		return x.BatchSizePerLog
+	}
+	return 0
+}
+
+func (x *IngestAllRequest) GetOutputDir() string {
+	if x != nil {
+		return x.OutputDir
+	}
+	return ""
+}
+
+func (x *IngestAllRequest) GetArchiveDir() string {
+	if x != nil {
+		return x.ArchiveDir
+	}
+	return ""
+}
+
+func (x *IngestAllRequest) GetProgressEvery() int64 {
+	if x != nil {
+		return x.ProgressEvery
+	}
+	return 0
+}
+
+// LogProgress is a per-log heartbeat streamed during IngestAll.
+type LogProgress struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	LogId            []byte                 `protobuf:"bytes,1,opt,name=log_id,json=logId,proto3" json:"log_id,omitempty"` // canonical SHA-256(SPKI), 32 bytes
+	Description      string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	Operator         string                 `protobuf:"bytes,3,opt,name=operator,proto3" json:"operator,omitempty"`
+	Protocol         string                 `protobuf:"bytes,4,opt,name=protocol,proto3" json:"protocol,omitempty"`                                          // "static-ct-api" | "rfc6962"
+	EntriesProcessed int64                  `protobuf:"varint,5,opt,name=entries_processed,json=entriesProcessed,proto3" json:"entries_processed,omitempty"` // session-local count
+	TotalProcessed   int64                  `protobuf:"varint,6,opt,name=total_processed,json=totalProcessed,proto3" json:"total_processed,omitempty"`       // cumulative across sessions
+	NextEntryIdx     int64                  `protobuf:"varint,7,opt,name=next_entry_idx,json=nextEntryIdx,proto3" json:"next_entry_idx,omitempty"`
+	TreeSize         int64                  `protobuf:"varint,8,opt,name=tree_size,json=treeSize,proto3" json:"tree_size,omitempty"`    // live tree size when known
+	Status           string                 `protobuf:"bytes,9,opt,name=status,proto3" json:"status,omitempty"`                         // "running" | "caught_up" | "error" | "complete"
+	Error            string                 `protobuf:"bytes,10,opt,name=error,proto3" json:"error,omitempty"`                          // populated when status == "error"
+	UpdatedAt        string                 `protobuf:"bytes,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // RFC3339
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *LogProgress) Reset() {
+	*x = LogProgress{}
+	mi := &file_ctingestion_v1_ingestion_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogProgress) ProtoMessage() {}
+
+func (x *LogProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v1_ingestion_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogProgress.ProtoReflect.Descriptor instead.
+func (*LogProgress) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v1_ingestion_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *LogProgress) GetLogId() []byte {
+	if x != nil {
+		return x.LogId
+	}
+	return nil
+}
+
+func (x *LogProgress) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *LogProgress) GetOperator() string {
+	if x != nil {
+		return x.Operator
+	}
+	return ""
+}
+
+func (x *LogProgress) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
+}
+
+func (x *LogProgress) GetEntriesProcessed() int64 {
+	if x != nil {
+		return x.EntriesProcessed
+	}
+	return 0
+}
+
+func (x *LogProgress) GetTotalProcessed() int64 {
+	if x != nil {
+		return x.TotalProcessed
+	}
+	return 0
+}
+
+func (x *LogProgress) GetNextEntryIdx() int64 {
+	if x != nil {
+		return x.NextEntryIdx
+	}
+	return 0
+}
+
+func (x *LogProgress) GetTreeSize() int64 {
+	if x != nil {
+		return x.TreeSize
+	}
+	return 0
+}
+
+func (x *LogProgress) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *LogProgress) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *LogProgress) GetUpdatedAt() string {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return ""
+}
+
 var File_ctingestion_v1_ingestion_proto protoreflect.FileDescriptor
 
 const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
@@ -519,9 +773,39 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\x06DbInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
 	"\n" +
-	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes2\xa7\x01\n" +
+	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\"\x86\x03\n" +
+	"\x10IngestAllRequest\x12 \n" +
+	"\flog_list_url\x18\x01 \x01(\tR\n" +
+	"logListUrl\x12\x1c\n" +
+	"\tprotocols\x18\x02 \x03(\tR\tprotocols\x12\x1c\n" +
+	"\toperators\x18\x03 \x03(\tR\toperators\x12-\n" +
+	"\x12excluded_operators\x18\n" +
+	" \x03(\tR\x11excludedOperators\x121\n" +
+	"\x14description_contains\x18\x04 \x01(\tR\x13descriptionContains\x12\x1e\n" +
+	"\vper_log_qps\x18\x05 \x01(\x01R\tperLogQps\x12+\n" +
+	"\x12batch_size_per_log\x18\x06 \x01(\x03R\x0fbatchSizePerLog\x12\x1d\n" +
+	"\n" +
+	"output_dir\x18\a \x01(\tR\toutputDir\x12\x1f\n" +
+	"\varchive_dir\x18\b \x01(\tR\n" +
+	"archiveDir\x12%\n" +
+	"\x0eprogress_every\x18\t \x01(\x03R\rprogressEvery\"\xe4\x02\n" +
+	"\vLogProgress\x12\x15\n" +
+	"\x06log_id\x18\x01 \x01(\fR\x05logId\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1a\n" +
+	"\boperator\x18\x03 \x01(\tR\boperator\x12\x1a\n" +
+	"\bprotocol\x18\x04 \x01(\tR\bprotocol\x12+\n" +
+	"\x11entries_processed\x18\x05 \x01(\x03R\x10entriesProcessed\x12'\n" +
+	"\x0ftotal_processed\x18\x06 \x01(\x03R\x0etotalProcessed\x12$\n" +
+	"\x0enext_entry_idx\x18\a \x01(\x03R\fnextEntryIdx\x12\x1b\n" +
+	"\ttree_size\x18\b \x01(\x03R\btreeSize\x12\x16\n" +
+	"\x06status\x18\t \x01(\tR\x06status\x12\x14\n" +
+	"\x05error\x18\n" +
+	" \x01(\tR\x05error\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\v \x01(\tR\tupdatedAt2\xf5\x01\n" +
 	"\x12CTIngestionService\x12K\n" +
-	"\tIngestLog\x12\x1d.ctingestion.v1.IngestRequest\x1a\x1d.ctingestion.v1.SubjectRecord0\x01\x12D\n" +
+	"\tIngestLog\x12\x1d.ctingestion.v1.IngestRequest\x1a\x1d.ctingestion.v1.SubjectRecord0\x01\x12L\n" +
+	"\tIngestAll\x12 .ctingestion.v1.IngestAllRequest\x1a\x1b.ctingestion.v1.LogProgress0\x01\x12D\n" +
 	"\x05Check\x12\x1c.ctingestion.v1.CheckRequest\x1a\x1d.ctingestion.v1.CheckResponseB1Z/github.com/benfultz/proto-ct/gen/ctingestion/v1b\x06proto3"
 
 var (
@@ -536,22 +820,26 @@ func file_ctingestion_v1_ingestion_proto_rawDescGZIP() []byte {
 	return file_ctingestion_v1_ingestion_proto_rawDescData
 }
 
-var file_ctingestion_v1_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_ctingestion_v1_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_ctingestion_v1_ingestion_proto_goTypes = []any{
-	(*IngestRequest)(nil), // 0: ctingestion.v1.IngestRequest
-	(*SubjectRecord)(nil), // 1: ctingestion.v1.SubjectRecord
-	(*CheckRequest)(nil),  // 2: ctingestion.v1.CheckRequest
-	(*CheckResponse)(nil), // 3: ctingestion.v1.CheckResponse
-	(*DbInfo)(nil),        // 4: ctingestion.v1.DbInfo
+	(*IngestRequest)(nil),    // 0: ctingestion.v1.IngestRequest
+	(*SubjectRecord)(nil),    // 1: ctingestion.v1.SubjectRecord
+	(*CheckRequest)(nil),     // 2: ctingestion.v1.CheckRequest
+	(*CheckResponse)(nil),    // 3: ctingestion.v1.CheckResponse
+	(*DbInfo)(nil),           // 4: ctingestion.v1.DbInfo
+	(*IngestAllRequest)(nil), // 5: ctingestion.v1.IngestAllRequest
+	(*LogProgress)(nil),      // 6: ctingestion.v1.LogProgress
 }
 var file_ctingestion_v1_ingestion_proto_depIdxs = []int32{
 	4, // 0: ctingestion.v1.CheckResponse.db_files:type_name -> ctingestion.v1.DbInfo
 	0, // 1: ctingestion.v1.CTIngestionService.IngestLog:input_type -> ctingestion.v1.IngestRequest
-	2, // 2: ctingestion.v1.CTIngestionService.Check:input_type -> ctingestion.v1.CheckRequest
-	1, // 3: ctingestion.v1.CTIngestionService.IngestLog:output_type -> ctingestion.v1.SubjectRecord
-	3, // 4: ctingestion.v1.CTIngestionService.Check:output_type -> ctingestion.v1.CheckResponse
-	3, // [3:5] is the sub-list for method output_type
-	1, // [1:3] is the sub-list for method input_type
+	5, // 2: ctingestion.v1.CTIngestionService.IngestAll:input_type -> ctingestion.v1.IngestAllRequest
+	2, // 3: ctingestion.v1.CTIngestionService.Check:input_type -> ctingestion.v1.CheckRequest
+	1, // 4: ctingestion.v1.CTIngestionService.IngestLog:output_type -> ctingestion.v1.SubjectRecord
+	6, // 5: ctingestion.v1.CTIngestionService.IngestAll:output_type -> ctingestion.v1.LogProgress
+	3, // 6: ctingestion.v1.CTIngestionService.Check:output_type -> ctingestion.v1.CheckResponse
+	4, // [4:7] is the sub-list for method output_type
+	1, // [1:4] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -568,7 +856,7 @@ func file_ctingestion_v1_ingestion_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ctingestion_v1_ingestion_proto_rawDesc), len(file_ctingestion_v1_ingestion_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

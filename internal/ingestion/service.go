@@ -30,6 +30,32 @@ type Service struct {
 	lastArchiveDir string
 	lastRoot       string
 	lastMetrics    *pb.CheckResponse // refreshed every 5 min during IngestLog
+
+	// shutdownCtx, when non-nil, is cancelled on a server shutdown signal. It is
+	// folded into each IngestAll's worker context so a SIGTERM drains the workers
+	// and triggers the deferred final flush — the server has no other way to make
+	// the long-lived IngestAll RPC return cleanly. Set once before Serve.
+	shutdownCtx context.Context
+}
+
+// SetShutdownContext registers a context whose cancellation signals graceful
+// shutdown to in-flight ingestion. Call once at startup, before serving.
+func (s *Service) SetShutdownContext(ctx context.Context) { s.shutdownCtx = ctx }
+
+// mergeContext returns a context that is done when either a or b is done, plus a
+// cancel func that releases the watcher goroutine. Used to fold the server-wide
+// shutdown signal into a per-RPC (stream) context.
+func mergeContext(a, b context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(a)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-b.Done():
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() { cancel(); close(stop) }
 }
 
 type issuerInfo struct {
@@ -159,7 +185,7 @@ func (s *Service) IngestLog(req *pb.IngestRequest, stream pb.CTIngestionService_
 			run.NextTileIdx, run.TotalProcessed)
 	}
 
-	client := ctlog.NewClient(req.MonitoringApiRoot, req.TargetQps)
+	client := ctlog.NewTileClient(req.MonitoringApiRoot, req.TargetQps)
 
 	// Per-session state.
 	issuerCache := make(map[[32]byte]*issuerInfo)
@@ -339,7 +365,7 @@ func (s *Service) metricsLoop(ctx context.Context, activeDir, archiveDir, root s
 func prefetchIssuers(
 	ctx context.Context,
 	leaves []*ctlog.TileLeaf,
-	client *ctlog.Client,
+	client *ctlog.TileClient,
 	issuerDB *db.IssuerDB,
 	cache map[[32]byte]*issuerInfo,
 ) error {

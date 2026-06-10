@@ -53,7 +53,7 @@ func computeMetrics(ctx context.Context, activeDir, archiveDir, monitoringRoot s
 
 	// Live tree size from the CT log checkpoint (uses unlimited client).
 	if monitoringRoot != "" {
-		c := ctlog.NewClient(monitoringRoot, 0)
+		c := ctlog.NewTileClient(monitoringRoot, 0)
 		if size, err := c.TreeSize(ctx); err == nil {
 			resp.TreeSize = size
 		}

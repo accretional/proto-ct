@@ -1,34 +1,27 @@
 #!/usr/bin/env bash
-# Brings up the local DNS stack used by the dnsfetch pipeline:
-#   - unbound on 127.0.0.1:5353 (tools/unbound.conf)
-#   - proto-domain server on :50098 with --upstream=127.0.0.1:5353
-# Idempotent — re-running won't double-start either component.
+# Brings up the proto-domain server with a round-robin pool of public
+# recursive resolvers. Idempotent — re-running won't double-start the server.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROTO_DOMAIN="${PROTO_DOMAIN:-/Users/benfultz/Dev/proto-domain}"
-UNBOUND_CONF="$REPO/tools/unbound.conf"
+
+# 16-endpoint pool: two IPs each across 8 providers. Round-robin
+# distribution at the proto-domain server keeps any one provider well
+# below its per-source-IP rate ceiling (~1000 q/s for Google, similar
+# for others). Override via UPSTREAMS=... if a provider misbehaves.
+UPSTREAMS="${UPSTREAMS:-\
+8.8.8.8:53,8.8.4.4:53,\
+1.1.1.1:53,1.0.0.1:53,\
+9.9.9.9:53,149.112.112.112:53,\
+208.67.222.222:53,208.67.220.220:53,\
+94.140.14.14:53,94.140.15.15:53,\
+64.6.64.6:53,64.6.65.6:53,\
+4.2.2.1:53,4.2.2.2:53,\
+185.228.168.9:53,185.228.169.9:53\
+}"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
-
-ensure_unbound() {
-  if pgrep -f "unbound -c $UNBOUND_CONF" >/dev/null; then
-    log "unbound already running"
-    return
-  fi
-  if ! command -v unbound >/dev/null; then
-    log "ERROR: unbound not on PATH (brew install unbound)"
-    exit 1
-  fi
-  log "starting unbound (config: $UNBOUND_CONF)"
-  unbound -c "$UNBOUND_CONF" -d >/dev/null 2>&1 &
-  sleep 2
-  if ! dig @127.0.0.1 -p 5353 +time=3 +tries=1 +short example.com A >/dev/null 2>&1; then
-    log "ERROR: unbound failed to answer on 127.0.0.1:5353"
-    exit 1
-  fi
-  log "unbound up"
-}
 
 ensure_proto_domain() {
   # Liveness is "port 50098 accepts a TCP connection," not "a matching
@@ -43,8 +36,8 @@ ensure_proto_domain() {
     log "ERROR: $PROTO_DOMAIN/bin/server not found (run build.sh in proto-domain)"
     exit 1
   fi
-  log "starting proto-domain server --upstream=127.0.0.1:5353"
-  (cd "$PROTO_DOMAIN" && ./bin/server --upstream=127.0.0.1:5353 >/tmp/proto-domain-server.log 2>&1 &)
+  log "starting proto-domain server with $(echo "$UPSTREAMS" | tr ',' '\n' | wc -l | tr -d ' ') upstreams"
+  (cd "$PROTO_DOMAIN" && ./bin/server --upstream="$UPSTREAMS" --upstream-stats-interval=60s >/tmp/proto-domain-server.log 2>&1 &)
   for i in 1 2 3 4 5; do
     sleep 1
     if (echo >/dev/tcp/127.0.0.1/50098) >/dev/null 2>&1; then
@@ -56,6 +49,5 @@ ensure_proto_domain() {
   exit 1
 }
 
-ensure_unbound
 ensure_proto_domain
 log "DNS stack ready"

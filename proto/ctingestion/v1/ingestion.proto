@@ -7,6 +7,11 @@ option go_package = "github.com/benfultz/proto-ct/gen/ctingestion/v1";
 service CTIngestionService {
   // IngestLog downloads CT log tiles, writes to SQLite, and streams parsed subjects.
   rpc IngestLog(IngestRequest) returns (stream SubjectRecord);
+  // IngestAll ingests from every CT log in the supplied log_list.json (server
+  // pulls https://www.gstatic.com/ct/log_list/v3/log_list.json by default),
+  // fanning out one worker per usable log. Streams LogProgress events instead
+  // of per-subject records — for low-volume per-log heartbeat in a TUI.
+  rpc IngestAll(IngestAllRequest) returns (stream LogProgress);
   // Check returns current ingestion metrics (tree size, coverage, DB sizes).
   rpc Check(CheckRequest) returns (CheckResponse);
 }
@@ -72,4 +77,45 @@ message CheckResponse {
 message DbInfo {
   string path        = 1;
   int64  size_bytes  = 2;
+}
+
+// IngestAllRequest configures a fan-out ingest across many CT logs.
+message IngestAllRequest {
+  // Where to fetch the log catalog. Empty = Google's gstatic v3 list.
+  string log_list_url = 1;
+  // Filter by protocol. Empty = both ("static-ct-api", "rfc6962").
+  repeated string protocols = 2;
+  // Filter by operator name. Empty = all operators.
+  repeated string operators = 3;
+  // Exclude these operators from the ingest. Applied AFTER the operators
+  // filter. Useful for skipping operators whose rate limits make them not
+  // worth the effort (e.g. Geomys at 1 QPS aggregate).
+  repeated string excluded_operators = 10;
+  // Optional substring match on log description (e.g. "2026h1"). Empty = no filter.
+  string description_contains = 4;
+  // Per-log target QPS. 0 = use protocol default (Google 25, others 10).
+  double per_log_qps = 5;
+  // Entries-per-log cap for this session. 0 = run until caught up.
+  int64 batch_size_per_log = 6;
+  // Active staging directory (fast local storage).
+  string output_dir = 7;
+  // Persistent archive directory (durable storage).
+  string archive_dir = 8;
+  // Emit a LogProgress event every N entries per log. 0 = default (10_000).
+  int64 progress_every = 9;
+}
+
+// LogProgress is a per-log heartbeat streamed during IngestAll.
+message LogProgress {
+  bytes  log_id              = 1;   // canonical SHA-256(SPKI), 32 bytes
+  string description         = 2;
+  string operator            = 3;
+  string protocol            = 4;   // "static-ct-api" | "rfc6962"
+  int64  entries_processed   = 5;   // session-local count
+  int64  total_processed     = 6;   // cumulative across sessions
+  int64  next_entry_idx      = 7;
+  int64  tree_size           = 8;   // live tree size when known
+  string status              = 9;   // "running" | "caught_up" | "error" | "complete"
+  string error               = 10;  // populated when status == "error"
+  string updated_at          = 11;  // RFC3339
 }

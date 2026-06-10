@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	CTIngestionService_IngestLog_FullMethodName = "/ctingestion.v1.CTIngestionService/IngestLog"
+	CTIngestionService_IngestAll_FullMethodName = "/ctingestion.v1.CTIngestionService/IngestAll"
 	CTIngestionService_Check_FullMethodName     = "/ctingestion.v1.CTIngestionService/Check"
 )
 
@@ -29,6 +30,11 @@ const (
 type CTIngestionServiceClient interface {
 	// IngestLog downloads CT log tiles, writes to SQLite, and streams parsed subjects.
 	IngestLog(ctx context.Context, in *IngestRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SubjectRecord], error)
+	// IngestAll ingests from every CT log in the supplied log_list.json (server
+	// pulls https://www.gstatic.com/ct/log_list/v3/log_list.json by default),
+	// fanning out one worker per usable log. Streams LogProgress events instead
+	// of per-subject records — for low-volume per-log heartbeat in a TUI.
+	IngestAll(ctx context.Context, in *IngestAllRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogProgress], error)
 	// Check returns current ingestion metrics (tree size, coverage, DB sizes).
 	Check(ctx context.Context, in *CheckRequest, opts ...grpc.CallOption) (*CheckResponse, error)
 }
@@ -60,6 +66,25 @@ func (c *cTIngestionServiceClient) IngestLog(ctx context.Context, in *IngestRequ
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type CTIngestionService_IngestLogClient = grpc.ServerStreamingClient[SubjectRecord]
 
+func (c *cTIngestionServiceClient) IngestAll(ctx context.Context, in *IngestAllRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogProgress], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &CTIngestionService_ServiceDesc.Streams[1], CTIngestionService_IngestAll_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[IngestAllRequest, LogProgress]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CTIngestionService_IngestAllClient = grpc.ServerStreamingClient[LogProgress]
+
 func (c *cTIngestionServiceClient) Check(ctx context.Context, in *CheckRequest, opts ...grpc.CallOption) (*CheckResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CheckResponse)
@@ -76,6 +101,11 @@ func (c *cTIngestionServiceClient) Check(ctx context.Context, in *CheckRequest, 
 type CTIngestionServiceServer interface {
 	// IngestLog downloads CT log tiles, writes to SQLite, and streams parsed subjects.
 	IngestLog(*IngestRequest, grpc.ServerStreamingServer[SubjectRecord]) error
+	// IngestAll ingests from every CT log in the supplied log_list.json (server
+	// pulls https://www.gstatic.com/ct/log_list/v3/log_list.json by default),
+	// fanning out one worker per usable log. Streams LogProgress events instead
+	// of per-subject records — for low-volume per-log heartbeat in a TUI.
+	IngestAll(*IngestAllRequest, grpc.ServerStreamingServer[LogProgress]) error
 	// Check returns current ingestion metrics (tree size, coverage, DB sizes).
 	Check(context.Context, *CheckRequest) (*CheckResponse, error)
 	mustEmbedUnimplementedCTIngestionServiceServer()
@@ -90,6 +120,9 @@ type UnimplementedCTIngestionServiceServer struct{}
 
 func (UnimplementedCTIngestionServiceServer) IngestLog(*IngestRequest, grpc.ServerStreamingServer[SubjectRecord]) error {
 	return status.Error(codes.Unimplemented, "method IngestLog not implemented")
+}
+func (UnimplementedCTIngestionServiceServer) IngestAll(*IngestAllRequest, grpc.ServerStreamingServer[LogProgress]) error {
+	return status.Error(codes.Unimplemented, "method IngestAll not implemented")
 }
 func (UnimplementedCTIngestionServiceServer) Check(context.Context, *CheckRequest) (*CheckResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Check not implemented")
@@ -126,6 +159,17 @@ func _CTIngestionService_IngestLog_Handler(srv interface{}, stream grpc.ServerSt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type CTIngestionService_IngestLogServer = grpc.ServerStreamingServer[SubjectRecord]
 
+func _CTIngestionService_IngestAll_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(IngestAllRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(CTIngestionServiceServer).IngestAll(m, &grpc.GenericServerStream[IngestAllRequest, LogProgress]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CTIngestionService_IngestAllServer = grpc.ServerStreamingServer[LogProgress]
+
 func _CTIngestionService_Check_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CheckRequest)
 	if err := dec(in); err != nil {
@@ -160,6 +204,11 @@ var CTIngestionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "IngestLog",
 			Handler:       _CTIngestionService_IngestLog_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "IngestAll",
+			Handler:       _CTIngestionService_IngestAll_Handler,
 			ServerStreams: true,
 		},
 	},
