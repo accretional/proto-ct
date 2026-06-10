@@ -54,40 +54,46 @@ if [ -z "$SPID" ]; then
   exit 0
 fi
 
-# ── 2. wait for the server's flush to drain ─────────────────────────────────
+# ── 2. stop ct-server: SIGTERM ONCE, then wait for its graceful exit ────────
+# The server's SIGTERM handler (cmd/server/main.go) cancels ingestion, runs the
+# final FlushAll, and GracefulStop then lets the process exit ON ITS OWN. So we
+# send ONE SIGTERM and WAIT for that natural exit. We do NOT send a second signal
+# on a short timer — that was the old bug: a 15s SIGKILL guillotined the graceful
+# flush and left the whole live pool un-archived (a 2nd signal also bypasses
+# NotifyContext to hard-kill mid-flush).
+#
+# The append-only flush is crash-safe (bounded batches + rollback journal) and
+# any un-flushed pool data stays on disk, so even the cap-SIGKILL below cannot
+# corrupt the archive — the worst case is a residual pool to drain afterward.
+pooldbs() { find "$REPO/data/active" -name subjects.db 2>/dev/null | wc -l | tr -d ' '; }
+
 if [ -n "$FORCE" ]; then
-  log "FORCE set — skipping flush wait. Hard-killing ct-server (pid $SPID). Un-flushed live-pool data WILL be lost."
+  log "FORCE set — SIGKILL ct-server (pid $SPID) now (skips the graceful flush; residual pool preserved, drain it after)."
+  pkill -KILL -x ct-server
+  pkill -KILL -f 'caffeinate -i .*/bin/ct-server' 2>/dev/null
 else
-  log "waiting for ct-server (pid $SPID) flush to complete before stopping it (cap ${FLUSH_MAX_WAIT_SEC}s)"
-  start=$(date +%s); quiet=0
-  while :; do
-    nf="$(newfiles "$SPID")"
-    st="$(ps -o state= -p "$SPID" 2>/dev/null | tr -d ' ')"
-    [ -z "$st" ] && { log "ct-server exited on its own during the wait"; exit 0; }
-    if [ "$nf" -eq 0 ]; then
-      quiet=$((quiet+1))
-    else
-      quiet=0
-    fi
-    cur="$(find "$ARCHIVE" -name "subjects.db.new.$SPID" 2>/dev/null | sed "s#.*/CT/##;s#/.*##" | tr '\n' ',')"
-    log "  flushing=[${cur}] flushfiles=$nf state=$st ssd=$(ssd_free)G quiet=${quiet}/${QUIET_POLLS}"
-    [ "$quiet" -ge "$QUIET_POLLS" ] && { log "no flush files for $((QUIET_POLLS*POLL_SEC))s — flush complete"; break; }
+  log "SIGTERM ct-server (pid $SPID): flushes the live pool during graceful shutdown then exits (cap ${FLUSH_MAX_WAIT_SEC}s; do NOT send a 2nd signal)"
+  pkill -TERM -x ct-server
+  start=$(date +%s)
+  while pgrep -x ct-server >/dev/null; do
+    log "  draining: poolDBs=$(pooldbs) flushfiles=$(newfiles "$SPID") ssd=$(ssd_free)G"
     if [ $(( $(date +%s) - start )) -ge "$FLUSH_MAX_WAIT_SEC" ]; then
-      log "ERROR: flush still active after ${FLUSH_MAX_WAIT_SEC}s. NOT killing the server (would corrupt the archive)."
-      log "       Investigate manually, or re-run with FORCE=1 if you accept the data loss."
-      exit 1
+      log "WARN: ct-server still up after ${FLUSH_MAX_WAIT_SEC}s — SIGKILL (safe: crash-safe append flush; residual pool preserved)."
+      pkill -KILL -x ct-server
+      break
     fi
     sleep "$POLL_SEC"
   done
 fi
-
-# ── 3. stop ct-server ───────────────────────────────────────────────────────
-log "stopping ct-server (pid $SPID)"
-pkill -TERM -x ct-server
 pkill -TERM -f 'caffeinate -i .*/bin/ct-server' 2>/dev/null
-for i in $(seq 1 15); do sleep 1; pgrep -x ct-server >/dev/null || break; done
-if pgrep -x ct-server >/dev/null; then
-  log "ct-server didn't exit on TERM; sending KILL"
-  pkill -KILL -x ct-server
+log "ct-server stopped. SSD $(ssd_free)G free."
+
+# ── 3. residual stragglers ──────────────────────────────────────────────────
+# The rollover-grace race can leave a few small month-DBs the server's flush
+# didn't pick up (a worker opened a month just after FlushAll snapshotted the
+# pool). They are preserved on disk — recover them (NEVER delete) with a drain:
+remaining="$(pooldbs)"
+if [ "$remaining" -gt 0 ]; then
+  log "note: $remaining residual pool month-DB(s) remain (stragglers/un-flushed)."
+  log "      drain into the archive with:  go run ./cmd/remerge-pools --no-seal --archive $ARCHIVE"
 fi
-log "CT pipeline stopped. SSD $(ssd_free)G free."
