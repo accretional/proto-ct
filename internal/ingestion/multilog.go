@@ -73,7 +73,11 @@ func defaultQPS(lg ctlist.Log) float64 {
 		// 4 Tuscolo shards × 1 QPS = 4 aggregate. Still 429s occasionally.
 		return 1
 	case "IPng Networks":
-		return 12 // 8 → 12 (algorithm bump, 55% threshold, clean)
+		// 12 → 4 (2026-06-09): with gouda2026h1+h2 both backfilling, per-shard 12
+		// blew past IPng's per-operator limit — observed ~99% 429 on gouda. IPng is
+		// a multi-shard operator (per-host limiter overshoots aggregate, like
+		// Geomys); 4/shard keeps the operator total saner. Reassess at checkins.
+		return 4
 	case "TrustAsia":
 		return 8
 	case "DigiCert":
