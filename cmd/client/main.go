@@ -33,8 +33,10 @@ var (
 	operators           = flag.String("operators", "", "comma-separated operator filter for --all (e.g. \"Let's Encrypt,Google\"); empty = all")
 	excludeOperators    = flag.String("exclude-operators", "", "comma-separated operators to exclude from --all (e.g. \"Geomys\")")
 	descContains        = flag.String("desc-contains", "", "only logs whose description contains this substring (e.g. '2026h1')")
+	excludeDescContains = flag.String("exclude-desc-contains", "", "comma-separated substrings; exclude any log whose description contains one (e.g. \"Gouda\")")
 	perLogQPS           = flag.Float64("per-log-qps", 0, "target QPS per log under --all; 0 = protocol default (static=20, rfc6962=10)")
 	batchSizePerLog     = flag.Int64("batch-per-log", 0, "entries-per-log cap for --all (0 = run until each log is caught up)")
+	fetchConcurrency    = flag.Int64("fetch-concurrency", 0, "max concurrent in-flight fetches per log (prefetch pipeline depth); 0 = default")
 	progressEvery       = flag.Int64("progress-every", 10000, "emit a LogProgress event every N entries per log")
 )
 
@@ -70,16 +72,18 @@ func runIngestAll(ctx context.Context, client pb.CTIngestionServiceClient) {
 		LogListUrl:          *logListURL,
 		Protocols:           splitCSV(*protocols),
 		Operators:           splitCSV(*operators),
-		ExcludedOperators:   splitCSV(*excludeOperators),
-		DescriptionContains: *descContains,
-		PerLogQps:           *perLogQPS,
-		BatchSizePerLog:     *batchSizePerLog,
-		OutputDir:           *activeDir,
-		ArchiveDir:          *archiveDir,
-		ProgressEvery:       *progressEvery,
+		ExcludedOperators:    splitCSV(*excludeOperators),
+		DescriptionContains:  *descContains,
+		ExcludedDescriptions: splitCSV(*excludeDescContains),
+		PerLogQps:            *perLogQPS,
+		BatchSizePerLog:      *batchSizePerLog,
+		FetchConcurrency:     *fetchConcurrency,
+		OutputDir:            *activeDir,
+		ArchiveDir:           *archiveDir,
+		ProgressEvery:        *progressEvery,
 	}
-	log.Printf("IngestAll: protocols=%v operators=%v desc=%q per-log-qps=%.0f batch-per-log=%d",
-		req.Protocols, req.Operators, req.DescriptionContains, req.PerLogQps, req.BatchSizePerLog)
+	log.Printf("IngestAll: protocols=%v operators=%v desc=%q exclude-desc=%v per-log-qps=%.0f batch-per-log=%d fetch-concurrency=%d",
+		req.Protocols, req.Operators, req.DescriptionContains, req.ExcludedDescriptions, req.PerLogQps, req.BatchSizePerLog, req.FetchConcurrency)
 
 	stream, err := client.IngestAll(ctx, req)
 	if err != nil {

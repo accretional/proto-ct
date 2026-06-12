@@ -491,8 +491,17 @@ type IngestAllRequest struct {
 	ArchiveDir string `protobuf:"bytes,8,opt,name=archive_dir,json=archiveDir,proto3" json:"archive_dir,omitempty"`
 	// Emit a LogProgress event every N entries per log. 0 = default (10_000).
 	ProgressEvery int64 `protobuf:"varint,9,opt,name=progress_every,json=progressEvery,proto3" json:"progress_every,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Exclude logs whose description contains any of these substrings (applied
+	// after the operators/description filters). Lets us drop individual logs
+	// rather than a whole operator — e.g. "Gouda" to skip IPng's aggressively
+	// single-IP-rate-limited gouda shards while keeping its halloumi logs.
+	ExcludedDescriptions []string `protobuf:"bytes,11,rep,name=excluded_descriptions,json=excludedDescriptions,proto3" json:"excluded_descriptions,omitempty"`
+	// Max concurrent in-flight fetch requests per log (prefetch pipeline depth).
+	// RFC6962 logs are latency-bound when fetched serially; overlapping K requests
+	// lets each log reach its per-log QPS limit. 0 = default.
+	FetchConcurrency int64 `protobuf:"varint,12,opt,name=fetch_concurrency,json=fetchConcurrency,proto3" json:"fetch_concurrency,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *IngestAllRequest) Reset() {
@@ -591,6 +600,20 @@ func (x *IngestAllRequest) GetArchiveDir() string {
 func (x *IngestAllRequest) GetProgressEvery() int64 {
 	if x != nil {
 		return x.ProgressEvery
+	}
+	return 0
+}
+
+func (x *IngestAllRequest) GetExcludedDescriptions() []string {
+	if x != nil {
+		return x.ExcludedDescriptions
+	}
+	return nil
+}
+
+func (x *IngestAllRequest) GetFetchConcurrency() int64 {
+	if x != nil {
+		return x.FetchConcurrency
 	}
 	return 0
 }
@@ -773,7 +796,7 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\x06DbInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
 	"\n" +
-	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\"\x86\x03\n" +
+	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\"\xe8\x03\n" +
 	"\x10IngestAllRequest\x12 \n" +
 	"\flog_list_url\x18\x01 \x01(\tR\n" +
 	"logListUrl\x12\x1c\n" +
@@ -788,7 +811,9 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"output_dir\x18\a \x01(\tR\toutputDir\x12\x1f\n" +
 	"\varchive_dir\x18\b \x01(\tR\n" +
 	"archiveDir\x12%\n" +
-	"\x0eprogress_every\x18\t \x01(\x03R\rprogressEvery\"\xe4\x02\n" +
+	"\x0eprogress_every\x18\t \x01(\x03R\rprogressEvery\x123\n" +
+	"\x15excluded_descriptions\x18\v \x03(\tR\x14excludedDescriptions\x12+\n" +
+	"\x11fetch_concurrency\x18\f \x01(\x03R\x10fetchConcurrency\"\xe4\x02\n" +
 	"\vLogProgress\x12\x15\n" +
 	"\x06log_id\x18\x01 \x01(\fR\x05logId\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1a\n" +

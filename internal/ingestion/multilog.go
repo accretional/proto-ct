@@ -132,6 +132,9 @@ func (s *Service) IngestAll(req *pb.IngestAllRequest, stream pb.CTIngestionServi
 	if req.DescriptionContains != "" {
 		catalog = filterByDescription(catalog, req.DescriptionContains)
 	}
+	if len(req.ExcludedDescriptions) > 0 {
+		catalog = filterExcludeDescriptions(catalog, req.ExcludedDescriptions)
+	}
 	if len(catalog) == 0 {
 		return status.Error(codes.NotFound, "no logs match the requested filters")
 	}
@@ -356,48 +359,19 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 
 	issuerCache := make(map[[32]byte]*issuerInfo)
 
-	for {
-		if err := ctx.Err(); err != nil {
-			in.events <- buildEvent(lg, "error", err.Error(), sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
-			return
-		}
-		if totalTarget > 0 && sessionProcessed >= totalTarget {
-			in.events <- buildEvent(lg, "complete", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
-			return
-		}
-		if cursor >= treeSize {
-			in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
-			return
-		}
+	page := defaultPageSize(lg)
+	conc := int(in.req.FetchConcurrency)
+	if conc <= 0 {
+		conc = defaultFetchConcurrency(lg)
+	}
 
-		end := cursor + multilogPageSize
-		if end > treeSize {
-			end = treeSize
-		}
-		leaves, err := client.FetchEntries(ctx, cursor, end)
-		if err != nil {
-			// Static-ct-api logs publish tiles asynchronously after the
-			// checkpoint advances; the trailing tile can 403/404 for a few
-			// seconds while we're at the frontier. Treat that as caught_up
-			// rather than a fatal error.
-			if ctlog.IsNotFound(err) {
-				in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
-				return
-			}
-			in.events <- buildErrorEvent(lg, cursor, run.TotalProcessed+sessionProcessed, err)
-			return
-		}
-		if len(leaves) == 0 {
-			in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
-			return
-		}
-
-		// Resolve issuers for this batch (mutex-protected because issuers.db is shared).
+	// processChunk resolves issuers for one fetched chunk and writes its subjects
+	// to the current pool. Called serially by the in-order consumer below, so the
+	// shared issuerCache needs no extra locking (issuers.db is guarded by issuerMu).
+	processChunk := func(leaves []*ctlog.LogLeaf) {
 		if err := prefetchIssuersLog(ctx, leaves, client, in.issuerDB, in.issuerMu, issuerCache); err != nil {
-			log.Printf("%s: prefetch issuers cursor=%d: %v", shortDesc(lg), cursor, err)
+			log.Printf("%s: prefetch issuers: %v", shortDesc(lg), err)
 		}
-
-		// Build subject batches grouped by NotBefore month.
 		byMonth := make(map[string]*monthBatch)
 		for _, leaf := range leaves {
 			subject, err := processLogLeaf(leaf, lg.LogID, issuerCache)
@@ -413,9 +387,7 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 			}
 			b.subjects = append(b.subjects, subject)
 		}
-		// Load the current pool. The rollover coordinator may swap it out
-		// from under us between iterations; loading here lets the swap take
-		// effect on the very next batch without further coordination.
+		// Load the current pool each chunk so a rollover swap takes effect promptly.
 		currentPool := in.poolRef.Load()
 		for month, batch := range byMonth {
 			sdb, err := currentPool.GetOrOpen(month)
@@ -427,19 +399,113 @@ func runLogWorker(ctx context.Context, in workerInputs) {
 				log.Printf("%s insert subjects month=%s: %v", shortDesc(lg), month, err)
 			}
 		}
+	}
 
-		// Advance cursor to one past the last leaf returned (handles short pages).
-		cursor = leaves[len(leaves)-1].EntryIdx + 1
-		sessionProcessed += int64(len(leaves))
-		if err := in.progressDB.UpdateLogProgress(lg.LogID, cursor, run.TotalProcessed+sessionProcessed); err != nil {
-			log.Printf("%s update progress: %v", shortDesc(lg), err)
+	type fetchRes struct {
+		start  int64
+		leaves []*ctlog.LogLeaf
+		err    error
+	}
+
+	for cursor < treeSize {
+		if err := ctx.Err(); err != nil {
+			in.events <- buildEvent(lg, "error", err.Error(), sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+			return
+		}
+		if totalTarget > 0 && sessionProcessed >= totalTarget {
+			in.events <- buildEvent(lg, "complete", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+			return
 		}
 
-		if sessionProcessed-lastEventAt >= in.progressEvery {
-			in.events <- buildEvent(lg, "running", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
-			lastEventAt = sessionProcessed
+		// Dispatch up to `conc` concurrent fetches for sequential chunks from the
+		// contiguous cursor. The rate limiter (inside the client) still caps the
+		// actual request rate; the pipeline just keeps it saturated despite
+		// per-request latency. Results are consumed IN ORDER so the persisted
+		// cursor only advances over completed contiguous ranges (crash-safe).
+		rcs := make([]chan fetchRes, 0, conc)
+		for dispatch := cursor; len(rcs) < conc && dispatch < treeSize; dispatch += page {
+			end := dispatch + page
+			if end > treeSize {
+				end = treeSize
+			}
+			rc := make(chan fetchRes, 1)
+			go func(s, e int64, rc chan fetchRes) {
+				lv, err := client.FetchEntries(ctx, s, e)
+				rc <- fetchRes{start: s, leaves: lv, err: err}
+			}(dispatch, end, rc)
+			rcs = append(rcs, rc)
+		}
+
+		resync := false // a short/empty/error chunk invalidates later speculative chunks
+		for _, rc := range rcs {
+			r := <-rc
+			if resync {
+				continue // drain the remaining speculative fetches without using them
+			}
+			if r.err != nil {
+				// Static-ct-api logs publish the trailing tile asynchronously; a
+				// 403/404 at the frontier means caught up, not a fatal error.
+				if ctlog.IsNotFound(r.err) {
+					in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+					return
+				}
+				in.events <- buildErrorEvent(lg, cursor, run.TotalProcessed+sessionProcessed, r.err)
+				return
+			}
+			if len(r.leaves) == 0 {
+				in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+				return
+			}
+			processChunk(r.leaves)
+			cursor = r.leaves[len(r.leaves)-1].EntryIdx + 1
+			sessionProcessed += int64(len(r.leaves))
+			if err := in.progressDB.UpdateLogProgress(lg.LogID, cursor, run.TotalProcessed+sessionProcessed); err != nil {
+				log.Printf("%s update progress: %v", shortDesc(lg), err)
+			}
+			if sessionProcessed-lastEventAt >= in.progressEvery {
+				in.events <- buildEvent(lg, "running", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+				lastEventAt = sessionProcessed
+			}
+			// A short chunk (fewer than the requested page) means we reached the
+			// frontier; the later speculative chunks started past the real end, so
+			// discard them and re-dispatch from the corrected cursor next iteration.
+			want := r.start + page
+			if want > treeSize {
+				want = treeSize
+			}
+			if r.start+int64(len(r.leaves)) < want {
+				resync = true
+			}
 		}
 	}
+	in.events <- buildEvent(lg, "caught_up", "", sessionProcessed, run.TotalProcessed+sessionProcessed, cursor, treeSize)
+}
+
+// pageSizeOverride forces the fetch chunk size when >0 (tests only).
+var pageSizeOverride int64
+
+// defaultPageSize is the entries-per-fetch chunk for a log. Cloudflare serves up
+// to 1024 entries per get-entries; others are capped lower server-side (Google
+// at 32) so a 256 chunk just means the client loops a few get-entries internally.
+func defaultPageSize(lg ctlist.Log) int64 {
+	if pageSizeOverride > 0 {
+		return pageSizeOverride
+	}
+	if lg.Operator == "Cloudflare" {
+		return 1024
+	}
+	return multilogPageSize
+}
+
+// defaultFetchConcurrency is the prefetch pipeline depth (concurrent in-flight
+// fetches per log). RFC6962 logs are latency-bound when fetched serially, so a
+// few concurrent requests let each reach its per-log QPS; static tiles are
+// CDN-served and already fast, so a smaller depth suffices.
+func defaultFetchConcurrency(lg ctlist.Log) int {
+	if lg.Protocol == ctlist.ProtocolRFC6962 {
+		return 4
+	}
+	return 2
 }
 
 type monthBatch struct {
@@ -466,6 +532,26 @@ func filterByDescription(catalog []ctlist.Log, substr string) []ctlist.Log {
 	out := catalog[:0]
 	for _, lg := range catalog {
 		if strings.Contains(lg.Description, substr) {
+			out = append(out, lg)
+		}
+	}
+	return out
+}
+
+// filterExcludeDescriptions drops any log whose description contains one of the
+// given substrings — per-log exclusion (e.g. "Gouda") that keeps the rest of the
+// operator's logs, unlike FilterExcludeOperators.
+func filterExcludeDescriptions(catalog []ctlist.Log, substrs []string) []ctlist.Log {
+	out := catalog[:0]
+	for _, lg := range catalog {
+		drop := false
+		for _, s := range substrs {
+			if s != "" && strings.Contains(lg.Description, s) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
 			out = append(out, lg)
 		}
 	}

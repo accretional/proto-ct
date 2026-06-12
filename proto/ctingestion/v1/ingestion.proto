@@ -103,6 +103,15 @@ message IngestAllRequest {
   string archive_dir = 8;
   // Emit a LogProgress event every N entries per log. 0 = default (10_000).
   int64 progress_every = 9;
+  // Exclude logs whose description contains any of these substrings (applied
+  // after the operators/description filters). Lets us drop individual logs
+  // rather than a whole operator — e.g. "Gouda" to skip IPng's aggressively
+  // single-IP-rate-limited gouda shards while keeping its halloumi logs.
+  repeated string excluded_descriptions = 11;
+  // Max concurrent in-flight fetch requests per log (prefetch pipeline depth).
+  // RFC6962 logs are latency-bound when fetched serially; overlapping K requests
+  // lets each log reach its per-log QPS limit. 0 = default.
+  int64 fetch_concurrency = 12;
 }
 
 // LogProgress is a per-log heartbeat streamed during IngestAll.

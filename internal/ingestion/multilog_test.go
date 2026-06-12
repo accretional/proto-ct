@@ -13,11 +13,13 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -306,6 +308,108 @@ func TestRunLogWorker_RFC6962_DedupAcrossLogs(t *testing.T) {
 	_ = conn.QueryRow(`SELECT COUNT(*) FROM subjects`).Scan(&subjectsCount)
 	if subjectsCount != 1 {
 		t.Errorf("expected 1 deduped subjects row, got %d", subjectsCount)
+	}
+}
+
+// TestRunLogWorker_Pipelined_MultiChunk exercises the concurrent prefetch
+// pipeline across several chunks (pageSizeOverride forces multiple chunks per
+// window) and a short trailing chunk at the frontier, verifying every entry is
+// archived exactly once (no gaps/dups from out-of-order completion) and the
+// persisted cursor advances contiguously to the tree size.
+func TestRunLogWorker_Pipelined_MultiChunk(t *testing.T) {
+	prev := pageSizeOverride
+	pageSizeOverride = 2 // 2 entries/chunk → several chunks, last one short
+	defer func() { pageSizeOverride = prev }()
+
+	notBefore := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	notAfter := notBefore.AddDate(0, 3, 0)
+	const N = 7 // not a multiple of the page size → forces a short final chunk
+	certs := make([][]byte, N)
+	for i := range certs {
+		certs[i] = mintTestCert(t, fmt.Sprintf("host%d.example.com", i), notBefore, notAfter)
+	}
+	chainDER := mintTestCert(t, "Test Intermediate CA", notBefore.AddDate(-1, 0, 0), notAfter.AddDate(2, 0, 0))
+	entries := make([]map[string]string, N)
+	for i, c := range certs {
+		entries[i] = map[string]string{
+			"leaf_input": base64.StdEncoding.EncodeToString(buildMerkleLeafBytes(uint64(time.Now().UnixMilli()), c)),
+			"extra_data": base64.StdEncoding.EncodeToString(buildExtraDataBytes(chainDER)),
+		}
+	}
+
+	// get-entries handler that RESPECTS the requested [start,end] range, so the
+	// pipeline's speculative sequential chunks return the correct sub-ranges.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ct/v1/get-sth":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tree_size": int64(N), "timestamp": time.Now().UnixMilli()})
+		case "/ct/v1/get-entries":
+			start, _ := strconv.Atoi(r.URL.Query().Get("start"))
+			end, _ := strconv.Atoi(r.URL.Query().Get("end"))
+			if end >= N {
+				end = N - 1
+			}
+			var sub []map[string]string
+			if start >= 0 && start < N && start <= end {
+				sub = entries[start : end+1]
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"entries": sub})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	var logID [32]byte
+	copy(logID[:], sha256.New().Sum([]byte("pipeline-log"))[:32])
+	lg := ctlist.Log{
+		LogID: logID, Description: "Pipeline test log", Operator: "TestOp",
+		Protocol: ctlist.ProtocolRFC6962, State: ctlist.StateUsable, SubmissionURL: srv.URL + "/",
+	}
+
+	tmp := t.TempDir()
+	activeDir := filepath.Join(tmp, "active")
+	archiveDir := filepath.Join(tmp, "archive")
+	if err := mkAll(activeDir, archiveDir); err != nil {
+		t.Fatal(err)
+	}
+	progressDB, _ := db.OpenProgressDB(filepath.Join(archiveDir, "progress.db"))
+	defer progressDB.Close()
+	issuerDB, _ := db.OpenIssuerDB(filepath.Join(archiveDir, "issuers.db"))
+	defer issuerDB.CheckpointAndClose()
+	pool := db.NewSubjectDBPool(filepath.Join(activeDir, "20260510"))
+
+	var issuerMu sync.Mutex
+	var poolRef atomic.Pointer[db.SubjectDBPool]
+	poolRef.Store(pool)
+	events := make(chan *pb.LogProgress, 64)
+	runLogWorker(context.Background(), workerInputs{
+		log: lg, req: &pb.IngestAllRequest{ProgressEvery: 1}, progressDB: progressDB,
+		issuerDB: issuerDB, issuerMu: &issuerMu, poolRef: &poolRef,
+		events: events, progressEvery: 1,
+	})
+	close(events)
+	var statuses []string
+	for ev := range events {
+		statuses = append(statuses, ev.Status)
+	}
+	if len(statuses) == 0 || statuses[len(statuses)-1] != "caught_up" {
+		t.Errorf("expected final status caught_up, got %v", statuses)
+	}
+
+	if err := pool.FlushAll(archiveDir); err != nil {
+		t.Fatalf("FlushAll: %v", err)
+	}
+	conn, _ := sql.Open("sqlite", filepath.Join(archiveDir, "2026-05", "subjects.db"))
+	defer conn.Close()
+	var got int
+	_ = conn.QueryRow(`SELECT COUNT(*) FROM subjects`).Scan(&got)
+	if got != N {
+		t.Errorf("archived %d subjects, want %d (gap/dup from the fetch pipeline)", got, N)
+	}
+	runs, _ := progressDB.ListLogRuns()
+	if len(runs) != 1 || runs[0].NextEntryIdx != N {
+		t.Errorf("cursor not contiguous: %+v, want NextEntryIdx=%d", runs, N)
 	}
 }
 
