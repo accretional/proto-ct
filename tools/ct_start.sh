@@ -20,6 +20,8 @@ cd "$REPO"
 PORT="${PORT:-50051}"
 MIN_FREE_GB="${MIN_FREE_GB:-35}"
 EXCLUDE_OPERATORS="${EXCLUDE_OPERATORS:-Geomys}"   # Geomys 429s aggressively; keep excluded
+EXCLUDE_DESC="${EXCLUDE_DESC:-Gouda}"              # IPng gouda shards: single-IP 429 wall, not worth it
+FETCH_CONC="${FETCH_CONC:-}"                       # per-log prefetch depth; empty = code default (4 rfc6962/2 static)
 SERVER_LOG="$REPO/data/logs/ct-server.log"
 CLIENT_LOG="$REPO/data/logs/ct-client.log"
 SERVER_ONLY="${SERVER_ONLY:-}"
@@ -64,8 +66,11 @@ if [ "$free" -lt "$MIN_FREE_GB" ]; then
   exit 1
 fi
 
-log "starting ct-client (--all --exclude-operators $EXCLUDE_OPERATORS); SSD ${free}G free"
-caffeinate -i "$REPO/bin/ct-client" --all --exclude-operators "$EXCLUDE_OPERATORS" >>"$CLIENT_LOG" 2>&1 &
+CLIENT_ARGS=(--all --exclude-operators "$EXCLUDE_OPERATORS")
+[ -n "$EXCLUDE_DESC" ] && CLIENT_ARGS+=(--exclude-desc-contains "$EXCLUDE_DESC")
+[ -n "$FETCH_CONC" ]   && CLIENT_ARGS+=(--fetch-concurrency "$FETCH_CONC")
+log "starting ct-client (${CLIENT_ARGS[*]}); SSD ${free}G free"
+caffeinate -i "$REPO/bin/ct-client" "${CLIENT_ARGS[@]}" >>"$CLIENT_LOG" 2>&1 &
 sleep 2
 pgrep -x ct-client >/dev/null && log "ct-client started (pid $(pgrep -x ct-client | tr '\n' ' '))" \
                               || { log "ERROR: ct-client failed to start (see $CLIENT_LOG)"; exit 1; }
