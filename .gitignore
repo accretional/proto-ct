@@ -40,3 +40,9 @@ bin/
 
 # Active staging directory (SSD-local, not committed)
 data/
+
+# Isolated reindex prototype scratch (snapshots + built indexes)
+/.reindex/
+
+# Stray reindex binary from `go build ./cmd/reindex` (sanctioned build -> .reindex/)
+/reindex

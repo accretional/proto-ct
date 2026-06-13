@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/accretional/proto-domain v0.0.0-00010101000000-000000000000
+	github.com/accretional/proto-ip v0.0.0-00010101000000-000000000000
 	github.com/google/certificate-transparency-go v1.3.3
 	golang.org/x/net v0.52.0
 	golang.org/x/time v0.15.0
@@ -21,7 +22,6 @@ replace github.com/accretional/gluon => ../gluon
 replace github.com/accretional/proto-ip => ../proto-ip
 
 require (
-	github.com/accretional/proto-ip v0.0.0-00010101000000-000000000000 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
