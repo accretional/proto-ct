@@ -42,6 +42,8 @@ var (
 	granularity = flag.String("granularity", "day", "partition granularity: day | hour")
 	userAgent   = flag.String("user-agent", "", "override User-Agent")
 	timeout     = flag.Duration("timeout", time.Hour, "overall RPC timeout")
+	covSTH      = flag.Bool("coverage-sth", true, "coverage mode: query the live STH for tree_size + coverage%%")
+	covGaps     = flag.Bool("coverage-gaps", true, "coverage mode: list missing index ranges")
 )
 
 func main() {
@@ -64,8 +66,10 @@ func main() {
 		runSTH(ctx, cli)
 	case "fetch":
 		runFetch(ctx, cli)
+	case "coverage":
+		runCoverage(ctx, cli)
 	default:
-		log.Fatalf("unknown -mode %q (want list|sth|fetch)", *mode)
+		log.Fatalf("unknown -mode %q (want list|sth|fetch|coverage)", *mode)
 	}
 }
 
@@ -161,5 +165,41 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 		resp.GetFirstIndex(), resp.GetLastIndex())
 	for _, p := range resp.GetPartitions() {
 		fmt.Printf("  %s  (%d entries)\n", p.GetPath(), p.GetEntryCount())
+	}
+}
+
+func runCoverage(ctx context.Context, cli pb.CTIngestionServiceClient) {
+	if *out == "" {
+		log.Fatalf("coverage mode needs -out (the output root to scan)")
+	}
+	resp, err := cli.CheckCoverage(ctx, &pb.CheckCoverageRequest{
+		Log:         selector(),
+		OutputRoot:  *out,
+		QuerySth:    *covSTH,
+		IncludeGaps: *covGaps,
+	})
+	if err != nil {
+		log.Fatalf("CheckCoverage: %v", err)
+	}
+	fmt.Printf("stored entries : %d across %d files\n", resp.GetStoredEntries(), resp.GetPartitionFiles())
+	fmt.Printf("frontier       : %d (highest stored index + 1)\n", resp.GetFrontier())
+	fmt.Printf("contiguous     : [0, %d)\n", resp.GetContiguousThrough())
+	if resp.GetTreeSize() > 0 {
+		fmt.Printf("tree size      : %d\n", resp.GetTreeSize())
+		fmt.Printf("coverage       : %.4f%%\n", resp.GetCoveragePct())
+	} else {
+		fmt.Printf("tree size      : (not queried)\n")
+	}
+	if len(resp.GetGaps()) > 0 {
+		fmt.Printf("gaps (%d):\n", len(resp.GetGaps()))
+		for i, g := range resp.GetGaps() {
+			if i >= 20 {
+				fmt.Printf("  ... and %d more\n", len(resp.GetGaps())-20)
+				break
+			}
+			fmt.Printf("  [%d, %d)  (%d entries)\n", g.GetStart(), g.GetEnd(), g.GetEnd()-g.GetStart())
+		}
+	} else {
+		fmt.Printf("gaps           : none\n")
 	}
 }

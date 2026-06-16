@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"filippo.io/sunlight"
+	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/tls"
 	"google.golang.org/protobuf/proto"
@@ -264,7 +264,7 @@ func TestLocalFSWriter_AtomicAndImmutable(t *testing.T) {
 		t.Errorf("content = %q, want hello", got)
 	}
 	// No leftover tmp file.
-	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel))+".tmp"); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel)) + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("tmp file not cleaned up")
 	}
 	// Immutable: second write to the same path must fail.
@@ -298,6 +298,103 @@ func TestBase36RoundTrip(t *testing.T) {
 	}
 	if _, err := decodeBase36("a-b"); err == nil {
 		t.Errorf("expected error decoding string with '-'")
+	}
+}
+
+func TestParseRangeFromName(t *testing.T) {
+	cases := []struct {
+		name      string
+		wantStart int64
+		wantEnd   int64
+		wantOK    bool
+	}{
+		{"0-0.binpb", 0, 1, true},
+		{"a-c.binpb", 10, 13, true},   // base36 a=10, c=12 -> [10,13)
+		{"274-27t.binpb", 0, 0, true}, // just checks ok + first<=last (values below)
+		{"foo.binpb", 0, 0, false},    // no dash
+		{"0-9.textpb", 0, 0, false},   // wrong ext
+		{"c-a.binpb", 0, 0, false},    // last < first
+	}
+	for _, c := range cases {
+		r, ok := parseRangeFromName(c.name)
+		if ok != c.wantOK {
+			t.Errorf("%s: ok=%v want %v", c.name, ok, c.wantOK)
+			continue
+		}
+		if c.wantOK && c.name == "a-c.binpb" && (r.start != 10 || r.end != 13) {
+			t.Errorf("a-c: got [%d,%d) want [10,13)", r.start, r.end)
+		}
+		if c.wantOK && c.name == "274-27t.binpb" {
+			f, _ := decodeBase36("274")
+			l, _ := decodeBase36("27t")
+			if r.start != f || r.end != l+1 {
+				t.Errorf("274-27t: got [%d,%d) want [%d,%d)", r.start, r.end, f, l+1)
+			}
+		}
+	}
+}
+
+func TestSummarizeRanges(t *testing.T) {
+	// Contiguous from 0, with a known tree size -> tail gap.
+	stored, frontier, contig, gaps := summarizeRanges([]idxRange{{1000, 2000}, {0, 1000}}, 5000)
+	if stored != 2000 || frontier != 2000 || contig != 2000 {
+		t.Errorf("contiguous: stored=%d frontier=%d contig=%d want 2000/2000/2000", stored, frontier, contig)
+	}
+	if len(gaps) != 1 || gaps[0] != (idxRange{2000, 5000}) {
+		t.Errorf("contiguous: gaps=%v want [[2000,5000)]", gaps)
+	}
+
+	// Hole in the middle.
+	stored, frontier, contig, gaps = summarizeRanges([]idxRange{{0, 1000}, {2000, 3000}}, 3000)
+	if stored != 2000 || frontier != 3000 || contig != 1000 {
+		t.Errorf("hole: stored=%d frontier=%d contig=%d want 2000/3000/1000", stored, frontier, contig)
+	}
+	if len(gaps) != 1 || gaps[0] != (idxRange{1000, 2000}) {
+		t.Errorf("hole: gaps=%v want [[1000,2000)]", gaps)
+	}
+
+	// No tree size -> gaps bounded by frontier (just the internal hole).
+	_, _, _, gaps = summarizeRanges([]idxRange{{0, 1000}, {2000, 3000}}, 0)
+	if len(gaps) != 1 || gaps[0] != (idxRange{1000, 2000}) {
+		t.Errorf("no-tree: gaps=%v want [[1000,2000)]", gaps)
+	}
+
+	// Empty.
+	stored, frontier, contig, gaps = summarizeRanges(nil, 100)
+	if stored != 0 || frontier != 0 || contig != 0 || len(gaps) != 1 || gaps[0] != (idxRange{0, 100}) {
+		t.Errorf("empty: stored=%d frontier=%d contig=%d gaps=%v", stored, frontier, contig, gaps)
+	}
+}
+
+func TestScanPartitionRanges(t *testing.T) {
+	root := t.TempDir()
+	slug := "deadbeef"
+	// two chunk dirs, each with the slug subtree (mirrors the chunked driver layout)
+	mk := func(rel string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("chunk_a/deadbeef/2024-01-01/0-9.binpb") // [0,10)
+	mk("chunk_a/deadbeef/2024-01-02/a-j.binpb") // [10,20)
+	mk("chunk_b/deadbeef/2024-01-03/k-t.binpb") // [20,30)
+	mk("chunk_b/otherlog/2024-01-03/0-9.binpb") // different slug -> ignored
+	mk("chunk_a/deadbeef/2024-01-01/notes.txt") // not binpb -> ignored
+
+	ranges, files, err := scanPartitionRanges(root, slug)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if files != 3 {
+		t.Errorf("files=%d want 3", files)
+	}
+	stored, frontier, contig, _ := summarizeRanges(ranges, 0)
+	if stored != 30 || frontier != 30 || contig != 30 {
+		t.Errorf("stored=%d frontier=%d contig=%d want 30/30/30", stored, frontier, contig)
 	}
 }
 

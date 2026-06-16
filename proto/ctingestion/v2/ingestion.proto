@@ -26,6 +26,12 @@ service CTIngestionService {
 
   // GetSTH returns the current signed tree head / checkpoint of the target log.
   rpc GetSTH(GetSTHRequest) returns (STHResponse);
+
+  // CheckCoverage reports how much of a single log has been fetched to disk
+  // under output_root, derived entirely from the stored partition files (their
+  // filenames encode the index ranges) — no progress DB. Optionally queries the
+  // log's current STH to report coverage_pct and gaps against the live tree.
+  rpc CheckCoverage(CheckCoverageRequest) returns (CheckCoverageResponse);
 }
 
 enum EntryType {
@@ -133,4 +139,32 @@ message STHResponse {
   int64 timestamp = 3;          // epoch ms
   bytes sha256_root_hash = 4;
   bytes tree_head_signature = 5;
+}
+
+// IndexRange is a half-open entry-index range [start, end).
+message IndexRange {
+  int64 start = 1; // inclusive
+  int64 end = 2;   // exclusive
+}
+
+message CheckCoverageRequest {
+  // Identifies the log; only log_id (preferred) or monitoring_url is needed to
+  // locate the on-disk partitions. query_sth additionally needs enough to fetch
+  // the STH (resolved via the log list when only log_id is given).
+  LogSelector log = 1;
+  string output_root = 2;  // base dir scanned for this log's partition files
+  bool query_sth = 3;      // fetch current STH -> tree_size + coverage_pct + gaps vs live tree
+  bool include_gaps = 4;   // return missing index ranges (for resume planning)
+}
+
+message CheckCoverageResponse {
+  int64 tree_size          = 1; // from STH if query_sth, else 0
+  int64 stored_entries     = 2; // total entries on disk (sum of stored ranges)
+  int64 frontier           = 3; // highest stored index + 1 (0 if nothing stored)
+  int64 contiguous_through = 4; // largest N such that [0, N) is fully stored
+  double coverage_pct      = 5; // stored_entries / tree_size * 100 (0 if tree_size unknown)
+  int64 partition_files    = 6; // number of .binpb files counted
+  // Missing index ranges, only populated when include_gaps. Bounded by tree_size
+  // when query_sth (so the tail [frontier, tree_size) is included), else by frontier.
+  repeated IndexRange gaps = 7;
 }

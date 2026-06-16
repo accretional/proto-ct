@@ -167,6 +167,11 @@ func (s *Service) GetSTH(ctx context.Context, req *pb.GetSTHRequest) (*pb.STHRes
 	if err != nil {
 		return nil, err
 	}
+	return s.fetchSTH(ctx, sel)
+}
+
+// fetchSTH retrieves the current STH/checkpoint for an already-resolved selector.
+func (s *Service) fetchSTH(ctx context.Context, sel *pb.LogSelector) (*pb.STHResponse, error) {
 	switch sel.Protocol {
 	case pb.LogProtocol_LOG_PROTOCOL_RFC6962:
 		lc, err := client.New(sel.MonitoringUrl, s.httpClient, jsonclient.Options{UserAgent: DefaultUserAgent})
@@ -252,4 +257,55 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		LastIndex:      sink.lastIndex,
 		Partitions:     sink.manifests,
 	}, nil
+}
+
+// ── CheckCoverage ────────────────────────────────────────────────────────────
+
+func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageRequest) (*pb.CheckCoverageResponse, error) {
+	if req.GetOutputRoot() == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required")
+	}
+	// The on-disk slug only needs log_id (or monitoring_url) — no network/log-list
+	// lookup unless we also need the STH.
+	rawSel := req.GetLog()
+	if rawSel == nil || (len(rawSel.GetLogId()) == 0 && rawSel.GetMonitoringUrl() == "") {
+		return nil, status.Error(codes.InvalidArgument, "log selector needs log_id or monitoring_url")
+	}
+	slug := logSlug(&pb.LogMeta{LogId: rawSel.GetLogId(), MonitoringUrl: rawSel.GetMonitoringUrl()})
+
+	ranges, files, err := scanPartitionRanges(req.GetOutputRoot(), slug)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "scan %s: %v", req.GetOutputRoot(), err)
+	}
+
+	var treeSize int64
+	if req.GetQuerySth() {
+		sel, err := s.resolveSelector(ctx, rawSel)
+		if err != nil {
+			return nil, err
+		}
+		sth, err := s.fetchSTH(ctx, sel)
+		if err != nil {
+			return nil, err
+		}
+		treeSize = sth.GetTreeSize()
+	}
+
+	stored, frontier, contiguous, gaps := summarizeRanges(ranges, treeSize)
+	resp := &pb.CheckCoverageResponse{
+		TreeSize:          treeSize,
+		StoredEntries:     stored,
+		Frontier:          frontier,
+		ContiguousThrough: contiguous,
+		PartitionFiles:    int64(files),
+	}
+	if treeSize > 0 {
+		resp.CoveragePct = float64(stored) / float64(treeSize) * 100
+	}
+	if req.GetIncludeGaps() {
+		for _, g := range gaps {
+			resp.Gaps = append(resp.Gaps, &pb.IndexRange{Start: g.start, End: g.end})
+		}
+	}
+	return resp, nil
 }

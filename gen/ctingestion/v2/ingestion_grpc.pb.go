@@ -22,6 +22,7 @@ const (
 	CTIngestionService_GetLogEntries_FullMethodName = "/ctingestion.v2.CTIngestionService/GetLogEntries"
 	CTIngestionService_GetLogList_FullMethodName    = "/ctingestion.v2.CTIngestionService/GetLogList"
 	CTIngestionService_GetSTH_FullMethodName        = "/ctingestion.v2.CTIngestionService/GetSTH"
+	CTIngestionService_CheckCoverage_FullMethodName = "/ctingestion.v2.CTIngestionService/CheckCoverage"
 )
 
 // CTIngestionServiceClient is the client API for CTIngestionService service.
@@ -46,6 +47,11 @@ type CTIngestionServiceClient interface {
 	GetLogList(ctx context.Context, in *GetLogListRequest, opts ...grpc.CallOption) (*CTLogList, error)
 	// GetSTH returns the current signed tree head / checkpoint of the target log.
 	GetSTH(ctx context.Context, in *GetSTHRequest, opts ...grpc.CallOption) (*STHResponse, error)
+	// CheckCoverage reports how much of a single log has been fetched to disk
+	// under output_root, derived entirely from the stored partition files (their
+	// filenames encode the index ranges) — no progress DB. Optionally queries the
+	// log's current STH to report coverage_pct and gaps against the live tree.
+	CheckCoverage(ctx context.Context, in *CheckCoverageRequest, opts ...grpc.CallOption) (*CheckCoverageResponse, error)
 }
 
 type cTIngestionServiceClient struct {
@@ -86,6 +92,16 @@ func (c *cTIngestionServiceClient) GetSTH(ctx context.Context, in *GetSTHRequest
 	return out, nil
 }
 
+func (c *cTIngestionServiceClient) CheckCoverage(ctx context.Context, in *CheckCoverageRequest, opts ...grpc.CallOption) (*CheckCoverageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckCoverageResponse)
+	err := c.cc.Invoke(ctx, CTIngestionService_CheckCoverage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CTIngestionServiceServer is the server API for CTIngestionService service.
 // All implementations must embed UnimplementedCTIngestionServiceServer
 // for forward compatibility.
@@ -108,6 +124,11 @@ type CTIngestionServiceServer interface {
 	GetLogList(context.Context, *GetLogListRequest) (*CTLogList, error)
 	// GetSTH returns the current signed tree head / checkpoint of the target log.
 	GetSTH(context.Context, *GetSTHRequest) (*STHResponse, error)
+	// CheckCoverage reports how much of a single log has been fetched to disk
+	// under output_root, derived entirely from the stored partition files (their
+	// filenames encode the index ranges) — no progress DB. Optionally queries the
+	// log's current STH to report coverage_pct and gaps against the live tree.
+	CheckCoverage(context.Context, *CheckCoverageRequest) (*CheckCoverageResponse, error)
 	mustEmbedUnimplementedCTIngestionServiceServer()
 }
 
@@ -126,6 +147,9 @@ func (UnimplementedCTIngestionServiceServer) GetLogList(context.Context, *GetLog
 }
 func (UnimplementedCTIngestionServiceServer) GetSTH(context.Context, *GetSTHRequest) (*STHResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSTH not implemented")
+}
+func (UnimplementedCTIngestionServiceServer) CheckCoverage(context.Context, *CheckCoverageRequest) (*CheckCoverageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckCoverage not implemented")
 }
 func (UnimplementedCTIngestionServiceServer) mustEmbedUnimplementedCTIngestionServiceServer() {}
 func (UnimplementedCTIngestionServiceServer) testEmbeddedByValue()                            {}
@@ -202,6 +226,24 @@ func _CTIngestionService_GetSTH_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CTIngestionService_CheckCoverage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckCoverageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CTIngestionServiceServer).CheckCoverage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CTIngestionService_CheckCoverage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CTIngestionServiceServer).CheckCoverage(ctx, req.(*CheckCoverageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CTIngestionService_ServiceDesc is the grpc.ServiceDesc for CTIngestionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -220,6 +262,10 @@ var CTIngestionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSTH",
 			Handler:    _CTIngestionService_GetSTH_Handler,
+		},
+		{
+			MethodName: "CheckCoverage",
+			Handler:    _CTIngestionService_CheckCoverage_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
