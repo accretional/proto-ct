@@ -187,6 +187,8 @@ func runCoverage(ctx context.Context, cli pb.CTIngestionServiceClient) {
 	if resp.GetTreeSize() > 0 {
 		fmt.Printf("tree size      : %d\n", resp.GetTreeSize())
 		fmt.Printf("coverage       : %.4f%%\n", resp.GetCoveragePct())
+	} else if resp.GetSthError() != "" {
+		fmt.Printf("tree size      : (STH unavailable: %s)\n", resp.GetSthError())
 	} else {
 		fmt.Printf("tree size      : (not queried)\n")
 	}

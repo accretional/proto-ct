@@ -167,4 +167,8 @@ message CheckCoverageResponse {
   // Missing index ranges, only populated when include_gaps. Bounded by tree_size
   // when query_sth (so the tail [frontier, tree_size) is included), else by frontier.
   repeated IndexRange gaps = 7;
+  // Set when query_sth was requested but the STH fetch failed (e.g. the log
+  // rate-limited us). The disk-derived fields are still valid; tree_size is 0 and
+  // coverage_pct/tail gap are omitted.
+  string sth_error = 8;
 }

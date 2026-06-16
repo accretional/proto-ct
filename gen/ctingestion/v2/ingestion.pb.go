@@ -1003,7 +1003,11 @@ type CheckCoverageResponse struct {
 	PartitionFiles    int64                  `protobuf:"varint,6,opt,name=partition_files,json=partitionFiles,proto3" json:"partition_files,omitempty"`          // number of .binpb files counted
 	// Missing index ranges, only populated when include_gaps. Bounded by tree_size
 	// when query_sth (so the tail [frontier, tree_size) is included), else by frontier.
-	Gaps          []*IndexRange `protobuf:"bytes,7,rep,name=gaps,proto3" json:"gaps,omitempty"`
+	Gaps []*IndexRange `protobuf:"bytes,7,rep,name=gaps,proto3" json:"gaps,omitempty"`
+	// Set when query_sth was requested but the STH fetch failed (e.g. the log
+	// rate-limited us). The disk-derived fields are still valid; tree_size is 0 and
+	// coverage_pct/tail gap are omitted.
+	SthError      string `protobuf:"bytes,8,opt,name=sth_error,json=sthError,proto3" json:"sth_error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1085,6 +1089,13 @@ func (x *CheckCoverageResponse) GetGaps() []*IndexRange {
 		return x.Gaps
 	}
 	return nil
+}
+
+func (x *CheckCoverageResponse) GetSthError() string {
+	if x != nil {
+		return x.SthError
+	}
+	return ""
 }
 
 var File_ctingestion_v2_ingestion_proto protoreflect.FileDescriptor
@@ -1176,7 +1187,7 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\voutput_root\x18\x02 \x01(\tR\n" +
 	"outputRoot\x12\x1b\n" +
 	"\tquery_sth\x18\x03 \x01(\bR\bquerySth\x12!\n" +
-	"\finclude_gaps\x18\x04 \x01(\bR\vincludeGaps\"\xa2\x02\n" +
+	"\finclude_gaps\x18\x04 \x01(\bR\vincludeGaps\"\xbf\x02\n" +
 	"\x15CheckCoverageResponse\x12\x1b\n" +
 	"\ttree_size\x18\x01 \x01(\x03R\btreeSize\x12%\n" +
 	"\x0estored_entries\x18\x02 \x01(\x03R\rstoredEntries\x12\x1a\n" +
@@ -1184,7 +1195,8 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\x12contiguous_through\x18\x04 \x01(\x03R\x11contiguousThrough\x12!\n" +
 	"\fcoverage_pct\x18\x05 \x01(\x01R\vcoveragePct\x12'\n" +
 	"\x0fpartition_files\x18\x06 \x01(\x03R\x0epartitionFiles\x12.\n" +
-	"\x04gaps\x18\a \x03(\v2\x1a.ctingestion.v2.IndexRangeR\x04gaps*T\n" +
+	"\x04gaps\x18\a \x03(\v2\x1a.ctingestion.v2.IndexRangeR\x04gaps\x12\x1b\n" +
+	"\tsth_error\x18\b \x01(\tR\bsthError*T\n" +
 	"\tEntryType\x12\x1a\n" +
 	"\x16ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fENTRY_TYPE_X509\x10\x01\x12\x16\n" +

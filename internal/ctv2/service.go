@@ -278,17 +278,20 @@ func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageReques
 		return nil, status.Errorf(codes.Internal, "scan %s: %v", req.GetOutputRoot(), err)
 	}
 
+	// Optionally query the live STH for tree_size/coverage. The disk-derived
+	// stats don't depend on it, so an STH failure (e.g. the log rate-limiting us
+	// while a mirror is running) degrades to disk-only with sth_error set, rather
+	// than failing the whole call.
 	var treeSize int64
+	var sthErr string
 	if req.GetQuerySth() {
-		sel, err := s.resolveSelector(ctx, rawSel)
-		if err != nil {
-			return nil, err
+		if sel, err := s.resolveSelector(ctx, rawSel); err != nil {
+			sthErr = err.Error()
+		} else if sth, err := s.fetchSTH(ctx, sel); err != nil {
+			sthErr = err.Error()
+		} else {
+			treeSize = sth.GetTreeSize()
 		}
-		sth, err := s.fetchSTH(ctx, sel)
-		if err != nil {
-			return nil, err
-		}
-		treeSize = sth.GetTreeSize()
 	}
 
 	stored, frontier, contiguous, gaps := summarizeRanges(ranges, treeSize)
@@ -298,6 +301,7 @@ func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageReques
 		Frontier:          frontier,
 		ContiguousThrough: contiguous,
 		PartitionFiles:    int64(files),
+		SthError:          sthErr,
 	}
 	if treeSize > 0 {
 		resp.CoveragePct = float64(stored) / float64(treeSize) * 100
