@@ -4,26 +4,29 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/jsonclient"
+	"github.com/google/certificate-transparency-go/scanner"
 )
 
-// rfc6962Fetcher wraps certificate-transparency-go's get-entries client.
-//
-// get-entries is server-paged: a single GetRawEntries(start, end) may return
-// fewer entries than requested, so we advance by the actual returned count
-// (serial). fetch_concurrency does not apply here — overlap-safe pipelining of
-// variable-size pages is a future enhancement; concurrency is honored on the
-// static path where the tile layout makes it safe.
+const defaultRFC6962BatchSize = 256
+
+// rfc6962Fetcher wraps certificate-transparency-go's scanner.Fetcher, which runs
+// a pool of get-entries workers, completes server-paged short reads internally,
+// and retries 429s with backoff. It emits contiguous EntryBatches (possibly out
+// of order across workers); each is converted and handed to the sink, which is
+// concurrency-safe.
 type rfc6962Fetcher struct {
-	lc       *client.LogClient
-	pageSpan int64 // requested span per get-entries call (server may shorten)
+	lc        *client.LogClient
+	batchSize int
+	parallel  int
 }
 
-func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageSize int) (*rfc6962Fetcher, error) {
+func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageSize, concurrency int) (*rfc6962Fetcher, error) {
 	hc := rateLimitedClient(qps)
 	if hc == nil {
 		hc = &http.Client{
@@ -39,40 +42,68 @@ func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageS
 	if err != nil {
 		return nil, fmt.Errorf("new rfc6962 client: %w", err)
 	}
-	span := int64(pageSize)
-	if span <= 0 {
-		span = 256
+	bs := pageSize
+	if bs <= 0 {
+		bs = defaultRFC6962BatchSize
 	}
-	return &rfc6962Fetcher{lc: lc, pageSpan: span}, nil
+	par := concurrency
+	if par < 1 {
+		par = 1
+	}
+	return &rfc6962Fetcher{lc: lc, batchSize: bs, parallel: par}, nil
 }
 
-func (f *rfc6962Fetcher) Fetch(ctx context.Context, start, end int64, emit func(*pb.RawLogEntry) error) error {
-	for idx := start; idx < end; {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		reqEnd := min(idx+f.pageSpan, end)
-		// GetRawEntries treats both bounds as inclusive.
-		resp, err := f.lc.GetRawEntries(ctx, idx, reqEnd-1)
-		if err != nil {
-			return fmt.Errorf("get-entries [%d,%d]: %w", idx, reqEnd-1, err)
-		}
-		if len(resp.Entries) == 0 {
-			return fmt.Errorf("get-entries returned 0 entries at index %d (range past tree size?)", idx)
-		}
-		for _, le := range resp.Entries {
-			if idx >= end {
-				break
-			}
-			r, err := rawEntryFromRFC6962(idx, le.LeafInput, le.ExtraData)
-			if err != nil {
-				return err
-			}
-			if err := emit(r); err != nil {
-				return err
-			}
-			idx++
-		}
+func (f *rfc6962Fetcher) Fetch(ctx context.Context, start, end int64, sink func([]*pb.RawLogEntry) error) error {
+	// Clamp to the current tree: scanner workers that request past the tree get
+	// empty responses and would spin (advancing by 0).
+	sth, err := f.lc.GetSTH(ctx)
+	if err != nil {
+		return fmt.Errorf("get-sth: %w", err)
 	}
-	return nil
+	if int64(sth.TreeSize) < end {
+		end = int64(sth.TreeSize)
+	}
+	if start >= end {
+		return nil
+	}
+
+	fetcher := scanner.NewFetcher(f.lc, &scanner.FetcherOptions{
+		BatchSize:     f.batchSize,
+		ParallelFetch: f.parallel,
+		StartIndex:    start,
+		EndIndex:      end,
+	})
+
+	var mu sync.Mutex
+	var firstErr error
+	fail := func(e error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = e
+			fetcher.Stop()
+		}
+		mu.Unlock()
+	}
+
+	runErr := fetcher.Run(ctx, func(b scanner.EntryBatch) {
+		entries := make([]*pb.RawLogEntry, 0, len(b.Entries))
+		for i, le := range b.Entries {
+			r, err := rawEntryFromRFC6962(b.Start+int64(i), le.LeafInput, le.ExtraData)
+			if err != nil {
+				fail(err)
+				return
+			}
+			entries = append(entries, r)
+		}
+		if err := sink(entries); err != nil {
+			fail(err)
+		}
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if firstErr != nil {
+		return firstErr
+	}
+	return runErr
 }

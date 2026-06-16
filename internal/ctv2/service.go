@@ -186,7 +186,7 @@ func (s *Service) GetSTH(ctx context.Context, req *pb.GetSTHRequest) (*pb.STHRes
 			TreeHeadSignature: sig,
 		}, nil
 	case pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API:
-		sf, err := newStaticFetcher(sel, DefaultUserAgent, 0, 0)
+		sf, err := newStaticFetcher(sel, DefaultUserAgent, 0, 0, 0)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 		}
@@ -223,9 +223,9 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 	var fetcher RangeFetcher
 	switch sel.Protocol {
 	case pb.LogProtocol_LOG_PROTOCOL_RFC6962:
-		fetcher, err = newRFC6962Fetcher(sel, ua, req.GetTargetQps(), int(req.GetPageSize()))
+		fetcher, err = newRFC6962Fetcher(sel, ua, req.GetTargetQps(), int(req.GetPageSize()), int(req.GetFetchConcurrency()))
 	case pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API:
-		fetcher, err = newStaticFetcher(sel, ua, req.GetTargetQps(), int(req.GetFetchConcurrency()))
+		fetcher, err = newStaticFetcher(sel, ua, req.GetTargetQps(), int(req.GetFetchConcurrency()), int(req.GetPageSize()))
 	default:
 		return nil, status.Error(codes.InvalidArgument, "unknown or unspecified log protocol")
 	}
@@ -238,28 +238,18 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		MonitoringUrl: sel.MonitoringUrl,
 		Protocol:      sel.Protocol,
 	}
-	pw := newPartitionWriter(&LocalFSWriter{Root: root}, meta, req.GetGranularity(), 0)
+	sink := newBatchSink(&LocalFSWriter{Root: root}, meta, req.GetGranularity())
 
-	var first, last int64 = -1, -1
-	emit := func(e *pb.RawLogEntry) error {
-		if first < 0 {
-			first = e.GetIndex()
-		}
-		last = e.GetIndex()
-		return pw.add(ctx, e)
-	}
-	if err := fetcher.Fetch(ctx, req.GetStartIndex(), req.GetEndIndex(), emit); err != nil {
+	sinkFn := func(entries []*pb.RawLogEntry) error { return sink.writeBatch(ctx, entries) }
+	if err := fetcher.Fetch(ctx, req.GetStartIndex(), req.GetEndIndex(), sinkFn); err != nil {
 		return nil, status.Errorf(codes.Internal, "fetch range: %v", err)
-	}
-	if err := pw.flushAll(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "flush partitions: %v", err)
 	}
 
 	return &pb.GetLogEntriesResponse{
-		EntriesWritten: pw.entriesWritten,
-		BytesWritten:   pw.bytesWritten,
-		FirstIndex:     first,
-		LastIndex:      last,
-		Partitions:     pw.manifests,
+		EntriesWritten: sink.entriesWritten,
+		BytesWritten:   sink.bytesWritten,
+		FirstIndex:     sink.firstIndex,
+		LastIndex:      sink.lastIndex,
+		Partitions:     sink.manifests,
 	}, nil
 }

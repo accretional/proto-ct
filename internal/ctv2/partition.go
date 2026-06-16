@@ -7,17 +7,13 @@ import (
 	"fmt"
 	"net/url"
 	"path"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"google.golang.org/protobuf/encoding/prototext"
 )
-
-// defaultMaxEntriesPerFile bounds how many leaves accumulate in one partition
-// file before it is flushed (keeps memory + file sizes bounded on big ranges).
-const defaultMaxEntriesPerFile = 50_000
 
 // logSlug derives a stable, filesystem-safe directory name for a log: the hex
 // log_id when known, else a sanitized monitoring URL.
@@ -33,7 +29,6 @@ func logSlug(meta *pb.LogMeta) string {
 	repl := strings.NewReplacer("/", "_", ":", "_", " ", "_")
 	slug := repl.Replace(u)
 	if slug == "" {
-		// Last resort: hash whatever selector text we have.
 		h := sha256.Sum256([]byte(meta.GetMonitoringUrl()))
 		return hex.EncodeToString(h[:8])
 	}
@@ -50,99 +45,93 @@ func leafDay(tsMs int64, g pb.PartitionGranularity) string {
 	return t.Format("2006-01-02")
 }
 
-// partitionWriter buckets RawLogEntries by (logSlug / leafDay) and flushes each
-// bucket to an immutable textproto file named <firstIdx>-<lastIdx>.textpb.
-type partitionWriter struct {
+// batchSink writes contiguous, index-ordered batches of leaves to immutable
+// textproto files. Each batch is split into one file per contiguous same-day
+// run, named <slug>/<day>/<firstIdx>-<lastIdx>.textpb. Because the fetcher
+// hands it disjoint batches of consecutive indices, every file covers a disjoint
+// contiguous index range and a re-run of the same (log, range, batch size,
+// granularity) produces byte-identical files. Safe for concurrent callers.
+type batchSink struct {
 	w           Writer
 	meta        *pb.LogMeta
 	slug        string
 	gran        pb.PartitionGranularity
-	maxEntries  int
 	marshalOpts prototext.MarshalOptions
 
-	bufs map[string]*partBuf
-
+	mu             sync.Mutex
 	manifests      []*pb.PartitionManifest
 	entriesWritten int64
 	bytesWritten   int64
+	firstIndex     int64 // overall min, -1 until first write
+	lastIndex      int64 // overall max, -1 until first write
 }
 
-type partBuf struct {
-	day     string // leafDay, relative to slug
-	entries []*pb.RawLogEntry
-}
-
-func newPartitionWriter(w Writer, meta *pb.LogMeta, gran pb.PartitionGranularity, maxEntries int) *partitionWriter {
-	if maxEntries <= 0 {
-		maxEntries = defaultMaxEntriesPerFile
-	}
-	return &partitionWriter{
+func newBatchSink(w Writer, meta *pb.LogMeta, gran pb.PartitionGranularity) *batchSink {
+	return &batchSink{
 		w:           w,
 		meta:        meta,
 		slug:        logSlug(meta),
 		gran:        gran,
-		maxEntries:  maxEntries,
 		marshalOpts: prototext.MarshalOptions{Multiline: true, Indent: "  "},
-		bufs:        make(map[string]*partBuf),
+		firstIndex:  -1,
+		lastIndex:   -1,
 	}
 }
 
-// add appends one entry to its partition bucket, flushing the bucket if it is full.
-func (p *partitionWriter) add(ctx context.Context, e *pb.RawLogEntry) error {
-	day := leafDay(e.GetTimestampMs(), p.gran)
-	b := p.bufs[day]
-	if b == nil {
-		b = &partBuf{day: day}
-		p.bufs[day] = b
-	}
-	b.entries = append(b.entries, e)
-	if len(b.entries) >= p.maxEntries {
-		return p.flushBucket(ctx, day)
-	}
-	return nil
-}
-
-func (p *partitionWriter) flushBucket(ctx context.Context, day string) error {
-	b := p.bufs[day]
-	if b == nil || len(b.entries) == 0 {
+// writeBatch persists one contiguous, index-ordered batch, splitting it into a
+// file per contiguous same-day run.
+func (s *batchSink) writeBatch(ctx context.Context, entries []*pb.RawLogEntry) error {
+	if len(entries) == 0 {
 		return nil
 	}
-	first := b.entries[0].GetIndex()
-	last := b.entries[len(b.entries)-1].GetIndex()
-	batch := &pb.RawLogEntryBatch{Log: p.meta, Entries: b.entries}
-	data, err := p.marshalOpts.Marshal(batch)
+	runStart := 0
+	curDay := leafDay(entries[0].GetTimestampMs(), s.gran)
+	for i := 1; i < len(entries); i++ {
+		d := leafDay(entries[i].GetTimestampMs(), s.gran)
+		if d != curDay {
+			if err := s.writeRun(ctx, curDay, entries[runStart:i]); err != nil {
+				return err
+			}
+			runStart = i
+			curDay = d
+		}
+	}
+	return s.writeRun(ctx, curDay, entries[runStart:])
+}
+
+func (s *batchSink) writeRun(ctx context.Context, day string, run []*pb.RawLogEntry) error {
+	if len(run) == 0 {
+		return nil
+	}
+	first := run[0].GetIndex()
+	last := run[len(run)-1].GetIndex()
+	batch := &pb.RawLogEntryBatch{Log: s.meta, Entries: run}
+	data, err := s.marshalOpts.Marshal(batch)
 	if err != nil {
 		return fmt.Errorf("marshal batch %s [%d,%d]: %w", day, first, last, err)
 	}
-	relPath := path.Join(p.slug, day, fmt.Sprintf("%d-%d.textpb", first, last))
-	if err := p.w.Put(ctx, relPath, data); err != nil {
+	relPath := path.Join(s.slug, day, fmt.Sprintf("%d-%d.textpb", first, last))
+	if err := s.w.Put(ctx, relPath, data); err != nil {
 		return err
 	}
-	p.manifests = append(p.manifests, &pb.PartitionManifest{
+
+	s.mu.Lock()
+	s.manifests = append(s.manifests, &pb.PartitionManifest{
 		Path:         relPath,
 		LeafDay:      day,
 		FirstIndex:   first,
 		LastIndex:    last,
-		EntryCount:   int64(len(b.entries)),
+		EntryCount:   int64(len(run)),
 		BytesWritten: int64(len(data)),
 	})
-	p.entriesWritten += int64(len(b.entries))
-	p.bytesWritten += int64(len(data))
-	delete(p.bufs, day)
-	return nil
-}
-
-// flushAll flushes every remaining bucket (deterministic order).
-func (p *partitionWriter) flushAll(ctx context.Context) error {
-	days := make([]string, 0, len(p.bufs))
-	for d := range p.bufs {
-		days = append(days, d)
+	s.entriesWritten += int64(len(run))
+	s.bytesWritten += int64(len(data))
+	if s.firstIndex < 0 || first < s.firstIndex {
+		s.firstIndex = first
 	}
-	sort.Strings(days)
-	for _, d := range days {
-		if err := p.flushBucket(ctx, d); err != nil {
-			return err
-		}
+	if last > s.lastIndex {
+		s.lastIndex = last
 	}
+	s.mu.Unlock()
 	return nil
 }

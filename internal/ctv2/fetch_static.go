@@ -10,15 +10,19 @@ import (
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 )
 
+const defaultStaticBatchSize = 256
+
 // staticFetcher wraps filippo.io/sunlight's static-ct-api client. Entries are
 // authenticated against the log checkpoint (nearly free), so the static path is
 // always "verified" regardless of the request's verify flag. fetch_concurrency
-// maps to sunlight's ConcurrencyLimit.
+// maps to sunlight's internal ConcurrencyLimit; the iterator yields in order, so
+// we chunk it into batchSize-sized batches and hand them to the sink serially.
 type staticFetcher struct {
-	client *sunlight.Client
+	client    *sunlight.Client
+	batchSize int
 }
 
-func newStaticFetcher(sel *pb.LogSelector, userAgent string, qps float64, concurrency int) (*staticFetcher, error) {
+func newStaticFetcher(sel *pb.LogSelector, userAgent string, qps float64, concurrency, batchSize int) (*staticFetcher, error) {
 	if len(sel.GetPublicKey()) == 0 {
 		return nil, errors.New("static-ct-api log requires public_key (DER SPKI) to verify the checkpoint")
 	}
@@ -37,7 +41,11 @@ func newStaticFetcher(sel *pb.LogSelector, userAgent string, qps float64, concur
 	if err != nil {
 		return nil, fmt.Errorf("new sunlight client: %w", err)
 	}
-	return &staticFetcher{client: c}, nil
+	bs := batchSize
+	if bs <= 0 {
+		bs = defaultStaticBatchSize
+	}
+	return &staticFetcher{client: c, batchSize: bs}, nil
 }
 
 // sth returns the static log's current checkpoint as an STHResponse. The
@@ -67,7 +75,7 @@ func (f *staticFetcher) sth(ctx context.Context, logID []byte) (*pb.STHResponse,
 	}, nil
 }
 
-func (f *staticFetcher) Fetch(ctx context.Context, start, end int64, emit func(*pb.RawLogEntry) error) error {
+func (f *staticFetcher) Fetch(ctx context.Context, start, end int64, sink func([]*pb.RawLogEntry) error) error {
 	cp, _, err := f.client.Checkpoint(ctx)
 	if err != nil {
 		return fmt.Errorf("fetch checkpoint: %w", err)
@@ -78,13 +86,30 @@ func (f *staticFetcher) Fetch(ctx context.Context, start, end int64, emit func(*
 	if start >= end {
 		return nil
 	}
+	batch := make([]*pb.RawLogEntry, 0, f.batchSize)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := sink(batch); err != nil {
+			return err
+		}
+		batch = make([]*pb.RawLogEntry, 0, f.batchSize)
+		return nil
+	}
 	for idx, e := range f.client.Entries(ctx, cp.Tree, start) {
 		if idx >= end {
 			break
 		}
-		if err := emit(rawEntryFromStatic(e)); err != nil {
-			return err
+		batch = append(batch, rawEntryFromStatic(e))
+		if len(batch) >= f.batchSize {
+			if err := flush(); err != nil {
+				return err
+			}
 		}
 	}
-	return f.client.Err()
+	if err := f.client.Err(); err != nil {
+		return err
+	}
+	return flush()
 }

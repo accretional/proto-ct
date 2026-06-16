@@ -2,9 +2,11 @@ package ctv2
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,14 +96,23 @@ func TestRawEntryFromStatic_Precert(t *testing.T) {
 	}
 }
 
-// memWriter is an in-memory Writer for tests.
+// memWriter is an in-memory, concurrency-safe Writer for tests. It enforces
+// immutability (write-once) like LocalFSWriter.
 type memWriter struct {
+	mu    sync.Mutex
 	files map[string][]byte
 }
 
+var errDuplicate = errors.New("duplicate partition path")
+
 func (m *memWriter) Put(_ context.Context, relPath string, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.files == nil {
 		m.files = map[string][]byte{}
+	}
+	if _, exists := m.files[relPath]; exists {
+		return errDuplicate
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
@@ -109,67 +120,104 @@ func (m *memWriter) Put(_ context.Context, relPath string, data []byte) error {
 	return nil
 }
 
-func TestPartitionWriter_SplitsAcrossDayBoundary(t *testing.T) {
+func (m *memWriter) has(suffix string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.files {
+		if strings.HasSuffix(k, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	day1 := time.Date(2024, 3, 15, 23, 0, 0, 0, time.UTC).UnixMilli()
 	day2 := time.Date(2024, 3, 16, 1, 0, 0, 0, time.UTC).UnixMilli()
 	meta := &pb.LogMeta{MonitoringUrl: "https://log.example/2024h1/"}
 
 	mw := &memWriter{}
-	pw := newPartitionWriter(mw, meta, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, 0)
-	ctx := context.Background()
+	s := newBatchSink(mw, meta, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY)
 
-	for _, e := range []*pb.RawLogEntry{
+	// One contiguous batch straddling midnight -> two contiguous same-day files.
+	err := s.writeBatch(context.Background(), []*pb.RawLogEntry{
 		{Index: 10, TimestampMs: day1},
 		{Index: 11, TimestampMs: day1},
 		{Index: 12, TimestampMs: day2},
-	} {
-		if err := pw.add(ctx, e); err != nil {
-			t.Fatalf("add: %v", err)
-		}
+	})
+	if err != nil {
+		t.Fatalf("writeBatch: %v", err)
 	}
-	if err := pw.flushAll(ctx); err != nil {
-		t.Fatalf("flushAll: %v", err)
-	}
-
 	if len(mw.files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
 	}
-	wantSuffixes := []string{"/2024-03-15/10-11.textpb", "/2024-03-16/12-12.textpb"}
-	for _, suf := range wantSuffixes {
-		found := false
-		for k := range mw.files {
-			if strings.HasSuffix(k, suf) {
-				found = true
-			}
-		}
-		if !found {
+	for _, suf := range []string{"/2024-03-15/10-11.textpb", "/2024-03-16/12-12.textpb"} {
+		if !mw.has(suf) {
 			t.Errorf("missing partition with suffix %q in %v", suf, keys(mw.files))
 		}
 	}
-	if pw.entriesWritten != 3 {
-		t.Errorf("entriesWritten = %d, want 3", pw.entriesWritten)
+	if s.entriesWritten != 3 || s.firstIndex != 10 || s.lastIndex != 12 {
+		t.Errorf("entriesWritten=%d first=%d last=%d, want 3/10/12", s.entriesWritten, s.firstIndex, s.lastIndex)
 	}
-	if len(pw.manifests) != 2 {
-		t.Errorf("manifests = %d, want 2", len(pw.manifests))
+	if len(s.manifests) != 2 {
+		t.Errorf("manifests = %d, want 2", len(s.manifests))
 	}
 }
 
-func TestPartitionWriter_MaxEntriesRollsFile(t *testing.T) {
+func TestBatchSink_DisjointBatchesSameDay(t *testing.T) {
 	ts := time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC).UnixMilli()
 	mw := &memWriter{}
-	pw := newPartitionWriter(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, 2)
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY)
 	ctx := context.Background()
-	for i := range int64(5) {
-		if err := pw.add(ctx, &pb.RawLogEntry{Index: i, TimestampMs: ts}); err != nil {
-			t.Fatalf("add: %v", err)
+	// Two disjoint batches in the same day -> two distinct files, no overlap.
+	if err := s.writeBatch(ctx, []*pb.RawLogEntry{{Index: 0, TimestampMs: ts}, {Index: 1, TimestampMs: ts}}); err != nil {
+		t.Fatalf("writeBatch 1: %v", err)
+	}
+	if err := s.writeBatch(ctx, []*pb.RawLogEntry{{Index: 2, TimestampMs: ts}, {Index: 3, TimestampMs: ts}}); err != nil {
+		t.Fatalf("writeBatch 2: %v", err)
+	}
+	if len(mw.files) != 2 {
+		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
+	}
+	if !mw.has("/2024-03-15/0-1.textpb") || !mw.has("/2024-03-15/2-3.textpb") {
+		t.Errorf("expected 0-1 and 2-3 files, got %v", keys(mw.files))
+	}
+}
+
+func TestBatchSink_ConcurrentBatchesSafe(t *testing.T) {
+	ts := time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC).UnixMilli()
+	mw := &memWriter{}
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY)
+	ctx := context.Background()
+
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for b := range n {
+		wg.Add(1)
+		go func(b int) {
+			defer wg.Done()
+			idx := int64(b * 2)
+			errs[b] = s.writeBatch(ctx, []*pb.RawLogEntry{
+				{Index: idx, TimestampMs: ts},
+				{Index: idx + 1, TimestampMs: ts},
+			})
+		}(b)
+	}
+	wg.Wait()
+	for b, err := range errs {
+		if err != nil {
+			t.Fatalf("batch %d: %v", b, err)
 		}
 	}
-	if err := pw.flushAll(ctx); err != nil {
-		t.Fatalf("flushAll: %v", err)
+	if len(mw.files) != n {
+		t.Errorf("got %d files, want %d", len(mw.files), n)
 	}
-	// maxEntries=2 over 5 entries (same day) => 3 files (2+2+1).
-	if len(mw.files) != 3 {
-		t.Fatalf("got %d files, want 3: %v", len(mw.files), keys(mw.files))
+	if s.entriesWritten != int64(2*n) {
+		t.Errorf("entriesWritten = %d, want %d", s.entriesWritten, 2*n)
+	}
+	if s.firstIndex != 0 || s.lastIndex != int64(2*n-1) {
+		t.Errorf("first/last = %d/%d, want 0/%d", s.firstIndex, s.lastIndex, 2*n-1)
 	}
 }
 
