@@ -14,7 +14,6 @@ import (
 	"filippo.io/sunlight"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/tls"
-	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -153,8 +152,8 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	}
 	// Indices are base-36 encoded in filenames: 10->a, 11->b, 12->c.
 	wantSuffixes := []string{
-		"/2024-03-15/" + encodeBase36(10) + "-" + encodeBase36(11) + ".textpb",
-		"/2024-03-16/" + encodeBase36(12) + "-" + encodeBase36(12) + ".textpb",
+		"/2024-03-15/" + encodeBase36(10) + "-" + encodeBase36(11) + ".binpb",
+		"/2024-03-16/" + encodeBase36(12) + "-" + encodeBase36(12) + ".binpb",
 	}
 	for _, suf := range wantSuffixes {
 		if !mw.has(suf) {
@@ -184,7 +183,7 @@ func TestBatchSink_DisjointBatchesSameDay(t *testing.T) {
 	if len(mw.files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
 	}
-	if !mw.has("/2024-03-15/0-1.textpb") || !mw.has("/2024-03-15/2-3.textpb") {
+	if !mw.has("/2024-03-15/0-1.binpb") || !mw.has("/2024-03-15/2-3.binpb") {
 		t.Errorf("expected 0-1 and 2-3 files, got %v", keys(mw.files))
 	}
 }
@@ -226,7 +225,7 @@ func TestBatchSink_ConcurrentBatchesSafe(t *testing.T) {
 	}
 }
 
-func TestRawLogEntryBatch_PrototextRoundTrip(t *testing.T) {
+func TestRawLogEntryBatch_BinaryRoundTrip(t *testing.T) {
 	batch := &pb.RawLogEntryBatch{
 		Log: &pb.LogMeta{MonitoringUrl: "https://log.example/", Protocol: pb.LogProtocol_LOG_PROTOCOL_RFC6962},
 		Entries: []*pb.RawLogEntry{
@@ -234,12 +233,12 @@ func TestRawLogEntryBatch_PrototextRoundTrip(t *testing.T) {
 			{Index: 2, TimestampMs: 200, EntryType: pb.EntryType_ENTRY_TYPE_PRECERT, Certificate: []byte{9}},
 		},
 	}
-	data, err := prototext.Marshal(batch)
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(batch)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	var got pb.RawLogEntryBatch
-	if err := prototext.Unmarshal(data, &got); err != nil {
+	if err := proto.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if !proto.Equal(batch, &got) {
@@ -251,7 +250,7 @@ func TestLocalFSWriter_AtomicAndImmutable(t *testing.T) {
 	dir := t.TempDir()
 	w := &LocalFSWriter{Root: dir}
 	ctx := context.Background()
-	rel := "slug/2024-03-15/0-9.textpb"
+	rel := "slug/2024-03-15/0-9.binpb"
 	data := []byte("hello")
 
 	if err := w.Put(ctx, rel, data); err != nil {

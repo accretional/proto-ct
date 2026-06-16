@@ -12,7 +12,7 @@ import (
 	"time"
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
-	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 )
 
 // logSlug derives a stable, filesystem-safe directory name for a log: the hex
@@ -46,17 +46,18 @@ func leafDay(tsMs int64, g pb.PartitionGranularity) string {
 }
 
 // batchSink writes contiguous, index-ordered batches of leaves to immutable
-// textproto files. Each batch is split into one file per contiguous same-day
-// run, named <slug>/<day>/<firstIdx>-<lastIdx>.textpb. Because the fetcher
-// hands it disjoint batches of consecutive indices, every file covers a disjoint
-// contiguous index range and a re-run of the same (log, range, batch size,
-// granularity) produces byte-identical files. Safe for concurrent callers.
+// binary-protobuf files. Each batch is split into one file per contiguous
+// same-day run, named <slug>/<day>/<firstIdx>-<lastIdx>.binpb. Because the
+// fetcher hands it disjoint batches of consecutive indices, every file covers a
+// disjoint contiguous index range and a re-run of the same (log, range, batch
+// size, granularity) produces byte-identical files (deterministic marshal).
+// Safe for concurrent callers.
 type batchSink struct {
 	w           Writer
 	meta        *pb.LogMeta
 	slug        string
 	gran        pb.PartitionGranularity
-	marshalOpts prototext.MarshalOptions
+	marshalOpts proto.MarshalOptions
 
 	mu             sync.Mutex
 	manifests      []*pb.PartitionManifest
@@ -72,7 +73,7 @@ func newBatchSink(w Writer, meta *pb.LogMeta, gran pb.PartitionGranularity) *bat
 		meta:        meta,
 		slug:        logSlug(meta),
 		gran:        gran,
-		marshalOpts: prototext.MarshalOptions{Multiline: true, Indent: "  "},
+		marshalOpts: proto.MarshalOptions{Deterministic: true},
 		firstIndex:  -1,
 		lastIndex:   -1,
 	}
@@ -110,7 +111,7 @@ func (s *batchSink) writeRun(ctx context.Context, day string, run []*pb.RawLogEn
 	if err != nil {
 		return fmt.Errorf("marshal batch %s [%d,%d]: %w", day, first, last, err)
 	}
-	relPath := path.Join(s.slug, day, encodeBase36(first)+"-"+encodeBase36(last)+".textpb")
+	relPath := path.Join(s.slug, day, encodeBase36(first)+"-"+encodeBase36(last)+".binpb")
 	if err := s.w.Put(ctx, relPath, data); err != nil {
 		return err
 	}

@@ -469,7 +469,8 @@ func (x *GetLogEntriesResponse) GetPartitions() []*PartitionManifest {
 	return nil
 }
 
-// RawLogEntry is the unified raw record persisted to disk (as textproto). For
+// RawLogEntry is the unified raw record persisted to disk (as binary protobuf,
+// in RawLogEntryBatch files). For
 // RFC 6962 logs, `leaf_input`/`extra_data` hold the verbatim wire bytes. For
 // static-ct-api logs (which expose entries already split), the certificate /
 // chain fields are populated instead. `source` says which fields are authoritative.
