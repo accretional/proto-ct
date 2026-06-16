@@ -46,10 +46,7 @@ func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageS
 	if bs <= 0 {
 		bs = defaultRFC6962BatchSize
 	}
-	par := concurrency
-	if par < 1 {
-		par = 1
-	}
+	par := max(concurrency, 1)
 	return &rfc6962Fetcher{lc: lc, batchSize: bs, parallel: par}, nil
 }
 

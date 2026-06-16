@@ -110,7 +110,7 @@ func (s *batchSink) writeRun(ctx context.Context, day string, run []*pb.RawLogEn
 	if err != nil {
 		return fmt.Errorf("marshal batch %s [%d,%d]: %w", day, first, last, err)
 	}
-	relPath := path.Join(s.slug, day, fmt.Sprintf("%d-%d.textpb", first, last))
+	relPath := path.Join(s.slug, day, encodeBase62(first)+"-"+encodeBase62(last)+".textpb")
 	if err := s.w.Put(ctx, relPath, data); err != nil {
 		return err
 	}

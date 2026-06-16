@@ -151,7 +151,12 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	if len(mw.files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
 	}
-	for _, suf := range []string{"/2024-03-15/10-11.textpb", "/2024-03-16/12-12.textpb"} {
+	// Indices are base-62 encoded in filenames: 10->A, 11->B, 12->C.
+	wantSuffixes := []string{
+		"/2024-03-15/" + encodeBase62(10) + "-" + encodeBase62(11) + ".textpb",
+		"/2024-03-16/" + encodeBase62(12) + "-" + encodeBase62(12) + ".textpb",
+	}
+	for _, suf := range wantSuffixes {
 		if !mw.has(suf) {
 			t.Errorf("missing partition with suffix %q in %v", suf, keys(mw.files))
 		}
@@ -266,6 +271,32 @@ func TestLocalFSWriter_AtomicAndImmutable(t *testing.T) {
 	// Immutable: second write to the same path must fail.
 	if err := w.Put(ctx, rel, []byte("world")); err == nil {
 		t.Errorf("expected immutability error on overwrite")
+	}
+}
+
+func TestBase62RoundTrip(t *testing.T) {
+	cases := []int64{0, 1, 9, 10, 61, 62, 63, 255, 2799999000, 1<<62 - 1, 1<<63 - 1}
+	for _, n := range cases {
+		enc := encodeBase62(n)
+		got, err := decodeBase62(enc)
+		if err != nil {
+			t.Errorf("decodeBase62(%q): %v", enc, err)
+			continue
+		}
+		if got != n {
+			t.Errorf("round-trip %d -> %q -> %d", n, enc, got)
+		}
+	}
+	// Encoding must stay filesystem/separator-safe.
+	for _, n := range cases {
+		for _, c := range encodeBase62(n) {
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+				t.Errorf("encodeBase62(%d)=%q contains non-alphanumeric %q", n, encodeBase62(n), c)
+			}
+		}
+	}
+	if _, err := decodeBase62("a-b"); err == nil {
+		t.Errorf("expected error decoding string with '-'")
 	}
 }
 
