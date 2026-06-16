@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/benfultz/proto-ct/internal/dashboard"
+	"github.com/accretional/proto-ct/internal/dashboard"
 )
 
 var reIngestionLine = regexp.MustCompile(

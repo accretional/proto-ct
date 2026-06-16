@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package ctingestion.v2;
+
+option go_package = "github.com/accretional/proto-ct/gen/ctingestion/v2";
+
+// CTLogList is the active CT log catalogue. It is mapped from the CT v3
+// log_list.json schema (as parsed by certificate-transparency-go's loglist3),
+// unifying RFC 6962 logs and Static CT API ("tiled") logs into one CTLog
+// shape distinguished by `protocol`. It is modeled after — but does not byte-
+// match — Chromium's components/certificate_transparency/certificate_transparency.proto.
+
+// LogProtocol is the wire protocol a log speaks. Shared by the log list and the
+// ingestion RPCs (which import this file).
+enum LogProtocol {
+  LOG_PROTOCOL_UNSPECIFIED = 0;
+  LOG_PROTOCOL_RFC6962 = 1;       // get-entries (certificate-transparency-go client)
+  LOG_PROTOCOL_STATIC_CT_API = 2; // c2sp.org/static-ct-api tiles (filippo.io/sunlight)
+}
+
+// CTLogState mirrors loglist3's mutually-exclusive log states.
+enum CTLogState {
+  CT_LOG_STATE_UNSPECIFIED = 0;
+  CT_LOG_STATE_PENDING = 1;
+  CT_LOG_STATE_QUALIFIED = 2;
+  CT_LOG_STATE_USABLE = 3;
+  CT_LOG_STATE_READONLY = 4;
+  CT_LOG_STATE_RETIRED = 5;
+  CT_LOG_STATE_REJECTED = 6;
+}
+
+message CTLogList {
+  string version = 1;
+  // Publication time of the list, epoch milliseconds.
+  int64 log_list_timestamp_ms = 2;
+  // True when the list contains all known logs, not only usable ones.
+  bool is_all_logs = 3;
+  repeated CTLogOperator operators = 4;
+}
+
+message CTLogOperator {
+  string name = 1;
+  repeated string email = 2;
+  repeated CTLog logs = 3;
+}
+
+// CTLog unifies loglist3's RFC 6962 `Log` and Static CT `TiledLog`. For RFC 6962
+// logs only `url` is set; for static logs `submission_url` and `monitoring_url`
+// are set.
+message CTLog {
+  bytes log_id = 1;   // SHA-256 of the public key (SPKI)
+  bytes key = 2;      // DER-encoded SubjectPublicKeyInfo
+  string description = 3;
+  LogProtocol protocol = 4;
+
+  string url = 5;             // RFC 6962 HTTPS API base
+  string submission_url = 6;  // static-ct-api
+  string monitoring_url = 7;  // static-ct-api
+
+  int32 mmd_seconds = 8;
+  string log_type = 9;        // "prod" | "test" | ""
+
+  CTLogState state = 10;
+  int64 state_timestamp_ms = 11;
+
+  // Set only for temporally-sharded logs (accepts certs whose NotAfter falls in
+  // [start_inclusive, end_exclusive)).
+  TemporalInterval temporal_interval = 12;
+}
+
+message TemporalInterval {
+  int64 start_inclusive_ms = 1;
+  int64 end_exclusive_ms = 2;
+}

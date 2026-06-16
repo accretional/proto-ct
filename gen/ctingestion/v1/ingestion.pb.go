@@ -806,7 +806,7 @@ const file_ctingestion_v1_ingestion_proto_rawDesc = "" +
 	"\x12CTIngestionService\x12K\n" +
 	"\tIngestLog\x12\x1d.ctingestion.v1.IngestRequest\x1a\x1d.ctingestion.v1.SubjectRecord0\x01\x12L\n" +
 	"\tIngestAll\x12 .ctingestion.v1.IngestAllRequest\x1a\x1b.ctingestion.v1.LogProgress0\x01\x12D\n" +
-	"\x05Check\x12\x1c.ctingestion.v1.CheckRequest\x1a\x1d.ctingestion.v1.CheckResponseB1Z/github.com/benfultz/proto-ct/gen/ctingestion/v1b\x06proto3"
+	"\x05Check\x12\x1c.ctingestion.v1.CheckRequest\x1a\x1d.ctingestion.v1.CheckResponseB1Z/github.com/accretional/proto-ct/gen/ctingestion/v1b\x06proto3"
 
 var (
 	file_ctingestion_v1_ingestion_proto_rawDescOnce sync.Once

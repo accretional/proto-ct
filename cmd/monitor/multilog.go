@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benfultz/proto-ct/internal/dashboard"
-	"github.com/benfultz/proto-ct/internal/db"
+	"github.com/accretional/proto-ct/internal/dashboard"
+	"github.com/accretional/proto-ct/internal/db"
 )
 
 // multilogPanel reads the log_runs table from progress.db and renders a row

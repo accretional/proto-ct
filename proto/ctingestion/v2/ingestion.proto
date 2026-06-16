@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package ctingestion.v2;
+
+option go_package = "github.com/accretional/proto-ct/gen/ctingestion/v2";
+
+import "ctingestion/v2/log_list.proto";
+
+// CTIngestionService (v2) is a stateless, range-addressable raw-leaf archiver.
+//
+// Unlike v1 (which parsed certs into tld-sharded SQLite behind a single writer),
+// v2 fetches a half-open entry range [start_index, end_index) from ONE log and
+// persists the Merkle tree leaves verbatim to disk as a base layer. All cert /
+// subject extraction is deferred to later tools. A job is a pure unit of work an
+// orchestrator can fan out across hosts and ranges — no shared writer, no merge.
+service CTIngestionService {
+  // GetLogEntries fetches [start_index, end_index) from the selected log and
+  // writes the raw leaves to disk (partitioned by leaf timestamp + index range),
+  // returning a manifest of what was written. (A streaming-progress variant may
+  // be added later.)
+  rpc GetLogEntries(GetLogEntriesRequest) returns (GetLogEntriesResponse);
+
+  // GetLogList returns the current CT log catalogue (default: Google's gstatic
+  // v3 log_list.json), mapped into CTLogList.
+  rpc GetLogList(GetLogListRequest) returns (CTLogList);
+
+  // GetSTH returns the current signed tree head / checkpoint of the target log.
+  rpc GetSTH(GetSTHRequest) returns (STHResponse);
+}
+
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  ENTRY_TYPE_X509 = 1;
+  ENTRY_TYPE_PRECERT = 2;
+}
+
+enum PartitionGranularity {
+  PARTITION_GRANULARITY_UNSPECIFIED = 0; // server treats as DAY
+  PARTITION_GRANULARITY_DAY = 1;
+  PARTITION_GRANULARITY_HOUR = 2;
+}
+
+// LogSelector identifies the target log. Either set `log_id` (resolved against
+// the server's cached log list, which supplies url/protocol/key) OR set
+// `monitoring_url` + `protocol` explicitly (+ `public_key` for static logs,
+// needed to verify the checkpoint).
+message LogSelector {
+  bytes log_id = 1;
+  string monitoring_url = 2;
+  LogProtocol protocol = 3;
+  bytes public_key = 4; // DER SubjectPublicKeyInfo
+}
+
+message GetLogEntriesRequest {
+  LogSelector log = 1;
+  int64 start_index = 2;
+  int64 end_index = 3; // exclusive
+
+  // Tuning knobs, exposed to the extent the underlying client allows.
+  double target_qps = 4;       // 0 = unlimited
+  int32 fetch_concurrency = 5; // parallel in-flight fetches; 0 = default
+  int32 page_size = 6;         // get-entries request size hint; 0 = provider max
+  string user_agent = 7;       // default: proto-ct (ct@accretional.com, +https://accretional.com)
+
+  string output_root = 8;                 // base dir for written partitions
+  PartitionGranularity granularity = 9;    // default DAY
+  bool verify = 10;                        // verify checkpoint/inclusion (default off for raw reads)
+}
+
+// PartitionManifest describes one written partition file.
+message PartitionManifest {
+  string path = 1;        // relative to output_root
+  string leaf_day = 2;    // YYYY-MM-DD or YYYY-MM-DD/HH
+  int64 first_index = 3;
+  int64 last_index = 4;
+  int64 entry_count = 5;
+  int64 bytes_written = 6;
+}
+
+message GetLogEntriesResponse {
+  int64 entries_written = 1;
+  int64 bytes_written = 2;
+  int64 first_index = 3;
+  int64 last_index = 4;
+  repeated PartitionManifest partitions = 5;
+}
+
+// RawLogEntry is the unified raw record persisted to disk (as textproto). For
+// RFC 6962 logs, `leaf_input`/`extra_data` hold the verbatim wire bytes. For
+// static-ct-api logs (which expose entries already split), the certificate /
+// chain fields are populated instead. `source` says which fields are authoritative.
+message RawLogEntry {
+  int64 index = 1;
+  int64 timestamp_ms = 2;
+  EntryType entry_type = 3;
+  LogProtocol source = 4;
+
+  // RFC 6962 verbatim.
+  bytes leaf_input = 5;  // TLS-encoded MerkleTreeLeaf
+  bytes extra_data = 6;  // cert chain / precert chain
+
+  // static-ct-api (sunlight LogEntry).
+  bytes certificate = 7;          // leaf cert DER (x509) or TBSCertificate (precert)
+  bytes precertificate = 8;       // precert chain entry pre_certificate
+  bytes issuer_key_hash = 9;      // precert issuer key hash
+  repeated bytes chain_fingerprints = 10; // SHA-256 of issuer chain certs
+}
+
+message LogMeta {
+  bytes log_id = 1;
+  string monitoring_url = 2;
+  LogProtocol protocol = 3;
+}
+
+// RawLogEntryBatch is the payload of a single on-disk partition file.
+message RawLogEntryBatch {
+  LogMeta log = 1;
+  repeated RawLogEntry entries = 2;
+}
+
+message GetLogListRequest {
+  string log_list_url = 1; // empty = gstatic v3 log_list.json
+}
+
+message GetSTHRequest {
+  LogSelector log = 1;
+}
+
+message STHResponse {
+  bytes log_id = 1;
+  int64 tree_size = 2;
+  int64 timestamp = 3;          // epoch ms
+  bytes sha256_root_hash = 4;
+  bytes tree_head_signature = 5;
+}

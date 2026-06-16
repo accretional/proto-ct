@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ctingestion.v1;
 
-option go_package = "github.com/benfultz/proto-ct/gen/ctingestion/v1";
+option go_package = "github.com/accretional/proto-ct/gen/ctingestion/v1";
 
 service CTIngestionService {
   // IngestLog downloads CT log tiles, writes to SQLite, and streams parsed subjects.

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benfultz/proto-ct/internal/dashboard"
+	"github.com/accretional/proto-ct/internal/dashboard"
 )
 
 var (
