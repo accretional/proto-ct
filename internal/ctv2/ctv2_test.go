@@ -151,10 +151,10 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	if len(mw.files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
 	}
-	// Indices are base-62 encoded in filenames: 10->A, 11->B, 12->C.
+	// Indices are base-36 encoded in filenames: 10->a, 11->b, 12->c.
 	wantSuffixes := []string{
-		"/2024-03-15/" + encodeBase62(10) + "-" + encodeBase62(11) + ".textpb",
-		"/2024-03-16/" + encodeBase62(12) + "-" + encodeBase62(12) + ".textpb",
+		"/2024-03-15/" + encodeBase36(10) + "-" + encodeBase36(11) + ".textpb",
+		"/2024-03-16/" + encodeBase36(12) + "-" + encodeBase36(12) + ".textpb",
 	}
 	for _, suf := range wantSuffixes {
 		if !mw.has(suf) {
@@ -274,28 +274,30 @@ func TestLocalFSWriter_AtomicAndImmutable(t *testing.T) {
 	}
 }
 
-func TestBase62RoundTrip(t *testing.T) {
+func TestBase36RoundTrip(t *testing.T) {
 	cases := []int64{0, 1, 9, 10, 61, 62, 63, 255, 2799999000, 1<<62 - 1, 1<<63 - 1}
 	for _, n := range cases {
-		enc := encodeBase62(n)
-		got, err := decodeBase62(enc)
+		enc := encodeBase36(n)
+		got, err := decodeBase36(enc)
 		if err != nil {
-			t.Errorf("decodeBase62(%q): %v", enc, err)
+			t.Errorf("decodeBase36(%q): %v", enc, err)
 			continue
 		}
 		if got != n {
 			t.Errorf("round-trip %d -> %q -> %d", n, enc, got)
 		}
 	}
-	// Encoding must stay filesystem/separator-safe.
+	// Encoding must stay filesystem/separator-safe AND single-case, so it is
+	// collision-free on case-INSENSITIVE filesystems (the bug that broke the
+	// earlier base-62 scheme on APFS). Only digits and lowercase letters allowed.
 	for _, n := range cases {
-		for _, c := range encodeBase62(n) {
-			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-				t.Errorf("encodeBase62(%d)=%q contains non-alphanumeric %q", n, encodeBase62(n), c)
+		for _, c := range encodeBase36(n) {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+				t.Errorf("encodeBase36(%d)=%q contains non-[0-9a-z] char %q", n, encodeBase36(n), c)
 			}
 		}
 	}
-	if _, err := decodeBase62("a-b"); err == nil {
+	if _, err := decodeBase36("a-b"); err == nil {
 		t.Errorf("expected error decoding string with '-'")
 	}
 }
