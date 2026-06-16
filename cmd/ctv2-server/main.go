@@ -14,6 +14,7 @@ import (
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"github.com/accretional/proto-ct/internal/ctv2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 var (
@@ -36,6 +37,9 @@ func main() {
 	svc := ctv2.NewService(*defaultRoot)
 	s := grpc.NewServer()
 	pb.RegisterCTIngestionServiceServer(s, svc)
+	// Server reflection so grpcurl / grpc_cli can introspect the service without
+	// needing the .proto files.
+	reflection.Register(s)
 
 	go func() {
 		<-ctx.Done()
