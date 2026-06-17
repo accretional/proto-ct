@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	pb "github.com/benfultz/proto-ct/gen/ctingestion/v1"
-	"github.com/benfultz/proto-ct/internal/ctlist"
-	"github.com/benfultz/proto-ct/internal/ingestion"
+	pb "github.com/accretional/proto-ct/gen/ctingestion/v1"
+	"github.com/accretional/proto-ct/internal/ctlist"
+	"github.com/accretional/proto-ct/internal/ingestion"
 	"google.golang.org/grpc"
 )
 

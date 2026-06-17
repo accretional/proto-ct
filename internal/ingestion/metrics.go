@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/benfultz/proto-ct/gen/ctingestion/v1"
-	"github.com/benfultz/proto-ct/internal/ctlog"
-	"github.com/benfultz/proto-ct/internal/db"
+	pb "github.com/accretional/proto-ct/gen/ctingestion/v1"
+	"github.com/accretional/proto-ct/internal/ctlog"
+	"github.com/accretional/proto-ct/internal/db"
 )
 
 // computeMetrics assembles a CheckResponse by reading the progress DB, walking

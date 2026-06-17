@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/benfultz/proto-ct/gen/ctingestion/v1"
+	pb "github.com/accretional/proto-ct/gen/ctingestion/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

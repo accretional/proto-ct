@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/benfultz/proto-ct/gen/ctingestion/v1"
-	"github.com/benfultz/proto-ct/internal/ctlist"
-	"github.com/benfultz/proto-ct/internal/db"
+	pb "github.com/accretional/proto-ct/gen/ctingestion/v1"
+	"github.com/accretional/proto-ct/internal/ctlist"
+	"github.com/accretional/proto-ct/internal/db"
 
 	_ "modernc.org/sqlite"
 )

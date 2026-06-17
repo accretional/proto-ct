@@ -37,7 +37,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"github.com/benfultz/proto-ct/internal/db"
+	"github.com/accretional/proto-ct/internal/db"
 	_ "modernc.org/sqlite"
 )
 

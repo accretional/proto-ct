@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benfultz/proto-ct/internal/db"
+	"github.com/accretional/proto-ct/internal/db"
 )
 
 var monthRe = regexp.MustCompile(`^\d{4}-\d{2}$`)
