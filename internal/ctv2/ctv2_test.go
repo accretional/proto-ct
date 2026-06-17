@@ -163,9 +163,7 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	if s.entriesWritten != 3 || s.firstIndex != 10 || s.lastIndex != 12 {
 		t.Errorf("entriesWritten=%d first=%d last=%d, want 3/10/12", s.entriesWritten, s.firstIndex, s.lastIndex)
 	}
-	if len(s.manifests) != 2 {
-		t.Errorf("manifests = %d, want 2", len(s.manifests))
-	}
+	// (file count already asserted above via len(mw.files) == 2)
 }
 
 func TestBatchSink_DisjointBatchesSameDay(t *testing.T) {

@@ -61,8 +61,8 @@ func TestLive_GetLogEntries(t *testing.T) {
 			if resp.EntriesWritten != 5 {
 				t.Errorf("entries_written = %d, want 5", resp.EntriesWritten)
 			}
-			if len(resp.Partitions) == 0 {
-				t.Errorf("no partitions written")
+			if resp.LastIndex != 4 {
+				t.Errorf("last_index = %d, want 4", resp.LastIndex)
 			}
 		})
 	}

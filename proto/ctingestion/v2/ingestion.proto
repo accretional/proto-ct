@@ -73,22 +73,16 @@ message GetLogEntriesRequest {
   bool verify = 10;                        // verify checkpoint/inclusion (default off for raw reads)
 }
 
-// PartitionManifest describes one written partition file.
-message PartitionManifest {
-  string path = 1;        // relative to output_root
-  string leaf_day = 2;    // YYYY-MM-DD or YYYY-MM-DD/HH
-  int64 first_index = 3;
-  int64 last_index = 4;
-  int64 entry_count = 5;
-  int64 bytes_written = 6;
-}
-
 message GetLogEntriesResponse {
   int64 entries_written = 1;
   int64 bytes_written = 2;
   int64 first_index = 3;
   int64 last_index = 4;
-  repeated PartitionManifest partitions = 5;
+  // A per-partition manifest was intentionally removed: large ranges produce
+  // tens of thousands of partitions and the response would exceed gRPC's message
+  // limit. Enumerate partitions from disk via CheckCoverage instead.
+  reserved 5;
+  reserved "partitions";
 }
 
 // RawLogEntry is the unified raw record persisted to disk (as binary protobuf,

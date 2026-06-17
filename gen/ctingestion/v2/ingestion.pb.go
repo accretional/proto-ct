@@ -308,105 +308,19 @@ func (x *GetLogEntriesRequest) GetVerify() bool {
 	return false
 }
 
-// PartitionManifest describes one written partition file.
-type PartitionManifest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`                      // relative to output_root
-	LeafDay       string                 `protobuf:"bytes,2,opt,name=leaf_day,json=leafDay,proto3" json:"leaf_day,omitempty"` // YYYY-MM-DD or YYYY-MM-DD/HH
-	FirstIndex    int64                  `protobuf:"varint,3,opt,name=first_index,json=firstIndex,proto3" json:"first_index,omitempty"`
-	LastIndex     int64                  `protobuf:"varint,4,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
-	EntryCount    int64                  `protobuf:"varint,5,opt,name=entry_count,json=entryCount,proto3" json:"entry_count,omitempty"`
-	BytesWritten  int64                  `protobuf:"varint,6,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PartitionManifest) Reset() {
-	*x = PartitionManifest{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PartitionManifest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PartitionManifest) ProtoMessage() {}
-
-func (x *PartitionManifest) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PartitionManifest.ProtoReflect.Descriptor instead.
-func (*PartitionManifest) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *PartitionManifest) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
-func (x *PartitionManifest) GetLeafDay() string {
-	if x != nil {
-		return x.LeafDay
-	}
-	return ""
-}
-
-func (x *PartitionManifest) GetFirstIndex() int64 {
-	if x != nil {
-		return x.FirstIndex
-	}
-	return 0
-}
-
-func (x *PartitionManifest) GetLastIndex() int64 {
-	if x != nil {
-		return x.LastIndex
-	}
-	return 0
-}
-
-func (x *PartitionManifest) GetEntryCount() int64 {
-	if x != nil {
-		return x.EntryCount
-	}
-	return 0
-}
-
-func (x *PartitionManifest) GetBytesWritten() int64 {
-	if x != nil {
-		return x.BytesWritten
-	}
-	return 0
-}
-
 type GetLogEntriesResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	EntriesWritten int64                  `protobuf:"varint,1,opt,name=entries_written,json=entriesWritten,proto3" json:"entries_written,omitempty"`
 	BytesWritten   int64                  `protobuf:"varint,2,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
 	FirstIndex     int64                  `protobuf:"varint,3,opt,name=first_index,json=firstIndex,proto3" json:"first_index,omitempty"`
 	LastIndex      int64                  `protobuf:"varint,4,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
-	Partitions     []*PartitionManifest   `protobuf:"bytes,5,rep,name=partitions,proto3" json:"partitions,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GetLogEntriesResponse) Reset() {
 	*x = GetLogEntriesResponse{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[3]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -418,7 +332,7 @@ func (x *GetLogEntriesResponse) String() string {
 func (*GetLogEntriesResponse) ProtoMessage() {}
 
 func (x *GetLogEntriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[3]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -431,7 +345,7 @@ func (x *GetLogEntriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLogEntriesResponse.ProtoReflect.Descriptor instead.
 func (*GetLogEntriesResponse) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{3}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *GetLogEntriesResponse) GetEntriesWritten() int64 {
@@ -462,13 +376,6 @@ func (x *GetLogEntriesResponse) GetLastIndex() int64 {
 	return 0
 }
 
-func (x *GetLogEntriesResponse) GetPartitions() []*PartitionManifest {
-	if x != nil {
-		return x.Partitions
-	}
-	return nil
-}
-
 // RawLogEntry is the unified raw record persisted to disk (as binary protobuf,
 // in RawLogEntryBatch files). For
 // RFC 6962 logs, `leaf_input`/`extra_data` hold the verbatim wire bytes. For
@@ -494,7 +401,7 @@ type RawLogEntry struct {
 
 func (x *RawLogEntry) Reset() {
 	*x = RawLogEntry{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[4]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -506,7 +413,7 @@ func (x *RawLogEntry) String() string {
 func (*RawLogEntry) ProtoMessage() {}
 
 func (x *RawLogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[4]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -519,7 +426,7 @@ func (x *RawLogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RawLogEntry.ProtoReflect.Descriptor instead.
 func (*RawLogEntry) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{4}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RawLogEntry) GetIndex() int64 {
@@ -603,7 +510,7 @@ type LogMeta struct {
 
 func (x *LogMeta) Reset() {
 	*x = LogMeta{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[5]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -615,7 +522,7 @@ func (x *LogMeta) String() string {
 func (*LogMeta) ProtoMessage() {}
 
 func (x *LogMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[5]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -628,7 +535,7 @@ func (x *LogMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogMeta.ProtoReflect.Descriptor instead.
 func (*LogMeta) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{5}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *LogMeta) GetLogId() []byte {
@@ -663,7 +570,7 @@ type RawLogEntryBatch struct {
 
 func (x *RawLogEntryBatch) Reset() {
 	*x = RawLogEntryBatch{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[6]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -675,7 +582,7 @@ func (x *RawLogEntryBatch) String() string {
 func (*RawLogEntryBatch) ProtoMessage() {}
 
 func (x *RawLogEntryBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[6]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -688,7 +595,7 @@ func (x *RawLogEntryBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RawLogEntryBatch.ProtoReflect.Descriptor instead.
 func (*RawLogEntryBatch) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{6}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RawLogEntryBatch) GetLog() *LogMeta {
@@ -714,7 +621,7 @@ type GetLogListRequest struct {
 
 func (x *GetLogListRequest) Reset() {
 	*x = GetLogListRequest{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[7]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +633,7 @@ func (x *GetLogListRequest) String() string {
 func (*GetLogListRequest) ProtoMessage() {}
 
 func (x *GetLogListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[7]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +646,7 @@ func (x *GetLogListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLogListRequest.ProtoReflect.Descriptor instead.
 func (*GetLogListRequest) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{7}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetLogListRequest) GetLogListUrl() string {
@@ -758,7 +665,7 @@ type GetSTHRequest struct {
 
 func (x *GetSTHRequest) Reset() {
 	*x = GetSTHRequest{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[8]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -770,7 +677,7 @@ func (x *GetSTHRequest) String() string {
 func (*GetSTHRequest) ProtoMessage() {}
 
 func (x *GetSTHRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[8]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -783,7 +690,7 @@ func (x *GetSTHRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSTHRequest.ProtoReflect.Descriptor instead.
 func (*GetSTHRequest) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{8}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetSTHRequest) GetLog() *LogSelector {
@@ -806,7 +713,7 @@ type STHResponse struct {
 
 func (x *STHResponse) Reset() {
 	*x = STHResponse{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[9]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -818,7 +725,7 @@ func (x *STHResponse) String() string {
 func (*STHResponse) ProtoMessage() {}
 
 func (x *STHResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[9]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -831,7 +738,7 @@ func (x *STHResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use STHResponse.ProtoReflect.Descriptor instead.
 func (*STHResponse) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{9}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *STHResponse) GetLogId() []byte {
@@ -880,7 +787,7 @@ type IndexRange struct {
 
 func (x *IndexRange) Reset() {
 	*x = IndexRange{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[10]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -892,7 +799,7 @@ func (x *IndexRange) String() string {
 func (*IndexRange) ProtoMessage() {}
 
 func (x *IndexRange) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[10]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -905,7 +812,7 @@ func (x *IndexRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexRange.ProtoReflect.Descriptor instead.
 func (*IndexRange) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{10}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *IndexRange) GetStart() int64 {
@@ -937,7 +844,7 @@ type CheckCoverageRequest struct {
 
 func (x *CheckCoverageRequest) Reset() {
 	*x = CheckCoverageRequest{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[11]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -949,7 +856,7 @@ func (x *CheckCoverageRequest) String() string {
 func (*CheckCoverageRequest) ProtoMessage() {}
 
 func (x *CheckCoverageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[11]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -962,7 +869,7 @@ func (x *CheckCoverageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckCoverageRequest.ProtoReflect.Descriptor instead.
 func (*CheckCoverageRequest) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{11}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CheckCoverageRequest) GetLog() *LogSelector {
@@ -1014,7 +921,7 @@ type CheckCoverageResponse struct {
 
 func (x *CheckCoverageResponse) Reset() {
 	*x = CheckCoverageResponse{}
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[12]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1026,7 +933,7 @@ func (x *CheckCoverageResponse) String() string {
 func (*CheckCoverageResponse) ProtoMessage() {}
 
 func (x *CheckCoverageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[12]
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1039,7 +946,7 @@ func (x *CheckCoverageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckCoverageResponse.ProtoReflect.Descriptor instead.
 func (*CheckCoverageResponse) Descriptor() ([]byte, []int) {
-	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{12}
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CheckCoverageResponse) GetTreeSize() int64 {
@@ -1124,26 +1031,14 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"outputRoot\x12F\n" +
 	"\vgranularity\x18\t \x01(\x0e2$.ctingestion.v2.PartitionGranularityR\vgranularity\x12\x16\n" +
 	"\x06verify\x18\n" +
-	" \x01(\bR\x06verify\"\xc8\x01\n" +
-	"\x11PartitionManifest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12\x19\n" +
-	"\bleaf_day\x18\x02 \x01(\tR\aleafDay\x12\x1f\n" +
-	"\vfirst_index\x18\x03 \x01(\x03R\n" +
-	"firstIndex\x12\x1d\n" +
-	"\n" +
-	"last_index\x18\x04 \x01(\x03R\tlastIndex\x12\x1f\n" +
-	"\ventry_count\x18\x05 \x01(\x03R\n" +
-	"entryCount\x12#\n" +
-	"\rbytes_written\x18\x06 \x01(\x03R\fbytesWritten\"\xe8\x01\n" +
+	" \x01(\bR\x06verify\"\xb7\x01\n" +
 	"\x15GetLogEntriesResponse\x12'\n" +
 	"\x0fentries_written\x18\x01 \x01(\x03R\x0eentriesWritten\x12#\n" +
 	"\rbytes_written\x18\x02 \x01(\x03R\fbytesWritten\x12\x1f\n" +
 	"\vfirst_index\x18\x03 \x01(\x03R\n" +
 	"firstIndex\x12\x1d\n" +
 	"\n" +
-	"last_index\x18\x04 \x01(\x03R\tlastIndex\x12A\n" +
-	"\n" +
-	"partitions\x18\x05 \x03(\v2!.ctingestion.v2.PartitionManifestR\n" +
+	"last_index\x18\x04 \x01(\x03R\tlastIndexJ\x04\b\x05\x10\x06R\n" +
 	"partitions\"\x94\x03\n" +
 	"\vRawLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12!\n" +
@@ -1225,52 +1120,50 @@ func file_ctingestion_v2_ingestion_proto_rawDescGZIP() []byte {
 }
 
 var file_ctingestion_v2_ingestion_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_ctingestion_v2_ingestion_proto_goTypes = []any{
 	(EntryType)(0),                // 0: ctingestion.v2.EntryType
 	(PartitionGranularity)(0),     // 1: ctingestion.v2.PartitionGranularity
 	(*LogSelector)(nil),           // 2: ctingestion.v2.LogSelector
 	(*GetLogEntriesRequest)(nil),  // 3: ctingestion.v2.GetLogEntriesRequest
-	(*PartitionManifest)(nil),     // 4: ctingestion.v2.PartitionManifest
-	(*GetLogEntriesResponse)(nil), // 5: ctingestion.v2.GetLogEntriesResponse
-	(*RawLogEntry)(nil),           // 6: ctingestion.v2.RawLogEntry
-	(*LogMeta)(nil),               // 7: ctingestion.v2.LogMeta
-	(*RawLogEntryBatch)(nil),      // 8: ctingestion.v2.RawLogEntryBatch
-	(*GetLogListRequest)(nil),     // 9: ctingestion.v2.GetLogListRequest
-	(*GetSTHRequest)(nil),         // 10: ctingestion.v2.GetSTHRequest
-	(*STHResponse)(nil),           // 11: ctingestion.v2.STHResponse
-	(*IndexRange)(nil),            // 12: ctingestion.v2.IndexRange
-	(*CheckCoverageRequest)(nil),  // 13: ctingestion.v2.CheckCoverageRequest
-	(*CheckCoverageResponse)(nil), // 14: ctingestion.v2.CheckCoverageResponse
-	(LogProtocol)(0),              // 15: ctingestion.v2.LogProtocol
-	(*CTLogList)(nil),             // 16: ctingestion.v2.CTLogList
+	(*GetLogEntriesResponse)(nil), // 4: ctingestion.v2.GetLogEntriesResponse
+	(*RawLogEntry)(nil),           // 5: ctingestion.v2.RawLogEntry
+	(*LogMeta)(nil),               // 6: ctingestion.v2.LogMeta
+	(*RawLogEntryBatch)(nil),      // 7: ctingestion.v2.RawLogEntryBatch
+	(*GetLogListRequest)(nil),     // 8: ctingestion.v2.GetLogListRequest
+	(*GetSTHRequest)(nil),         // 9: ctingestion.v2.GetSTHRequest
+	(*STHResponse)(nil),           // 10: ctingestion.v2.STHResponse
+	(*IndexRange)(nil),            // 11: ctingestion.v2.IndexRange
+	(*CheckCoverageRequest)(nil),  // 12: ctingestion.v2.CheckCoverageRequest
+	(*CheckCoverageResponse)(nil), // 13: ctingestion.v2.CheckCoverageResponse
+	(LogProtocol)(0),              // 14: ctingestion.v2.LogProtocol
+	(*CTLogList)(nil),             // 15: ctingestion.v2.CTLogList
 }
 var file_ctingestion_v2_ingestion_proto_depIdxs = []int32{
-	15, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
+	14, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
 	2,  // 1: ctingestion.v2.GetLogEntriesRequest.log:type_name -> ctingestion.v2.LogSelector
 	1,  // 2: ctingestion.v2.GetLogEntriesRequest.granularity:type_name -> ctingestion.v2.PartitionGranularity
-	4,  // 3: ctingestion.v2.GetLogEntriesResponse.partitions:type_name -> ctingestion.v2.PartitionManifest
-	0,  // 4: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
-	15, // 5: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
-	15, // 6: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
-	7,  // 7: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
-	6,  // 8: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
-	2,  // 9: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
-	2,  // 10: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
-	12, // 11: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
-	3,  // 12: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
-	9,  // 13: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
-	10, // 14: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
-	13, // 15: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
-	5,  // 16: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
-	16, // 17: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
-	11, // 18: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
-	14, // 19: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
-	16, // [16:20] is the sub-list for method output_type
-	12, // [12:16] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	0,  // 3: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
+	14, // 4: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
+	14, // 5: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
+	6,  // 6: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
+	5,  // 7: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
+	2,  // 8: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
+	2,  // 9: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
+	11, // 10: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
+	3,  // 11: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
+	8,  // 12: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
+	9,  // 13: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
+	12, // 14: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
+	4,  // 15: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
+	15, // 16: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
+	10, // 17: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
+	13, // 18: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_ctingestion_v2_ingestion_proto_init() }
@@ -1285,7 +1178,7 @@ func file_ctingestion_v2_ingestion_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ctingestion_v2_ingestion_proto_rawDesc), len(file_ctingestion_v2_ingestion_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   13,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
