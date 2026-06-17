@@ -255,7 +255,6 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		BytesWritten:   sink.bytesWritten,
 		FirstIndex:     sink.firstIndex,
 		LastIndex:      sink.lastIndex,
-		Partitions:     sink.manifests,
 	}, nil
 }
 

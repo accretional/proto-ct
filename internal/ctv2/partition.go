@@ -60,7 +60,6 @@ type batchSink struct {
 	marshalOpts proto.MarshalOptions
 
 	mu             sync.Mutex
-	manifests      []*pb.PartitionManifest
 	entriesWritten int64
 	bytesWritten   int64
 	firstIndex     int64 // overall min, -1 until first write
@@ -117,14 +116,6 @@ func (s *batchSink) writeRun(ctx context.Context, day string, run []*pb.RawLogEn
 	}
 
 	s.mu.Lock()
-	s.manifests = append(s.manifests, &pb.PartitionManifest{
-		Path:         relPath,
-		LeafDay:      day,
-		FirstIndex:   first,
-		LastIndex:    last,
-		EntryCount:   int64(len(run)),
-		BytesWritten: int64(len(data)),
-	})
 	s.entriesWritten += int64(len(run))
 	s.bytesWritten += int64(len(data))
 	if s.firstIndex < 0 || first < s.firstIndex {

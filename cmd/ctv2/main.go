@@ -160,12 +160,9 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 	if err != nil {
 		log.Fatalf("GetLogEntries: %v", err)
 	}
-	fmt.Printf("wrote %d entries (%d bytes) across %d partitions, indices [%d, %d]\n",
-		resp.GetEntriesWritten(), resp.GetBytesWritten(), len(resp.GetPartitions()),
+	fmt.Printf("wrote %d entries (%d bytes), indices [%d, %d]\n",
+		resp.GetEntriesWritten(), resp.GetBytesWritten(),
 		resp.GetFirstIndex(), resp.GetLastIndex())
-	for _, p := range resp.GetPartitions() {
-		fmt.Printf("  %s  (%d entries)\n", p.GetPath(), p.GetEntryCount())
-	}
 }
 
 func runCoverage(ctx context.Context, cli pb.CTIngestionServiceClient) {
