@@ -264,15 +264,9 @@ func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageReques
 	if req.GetOutputRoot() == "" {
 		return nil, status.Error(codes.InvalidArgument, "output_root required")
 	}
-	// The on-disk slug only needs log_id (or monitoring_url) — no network/log-list
-	// lookup unless we also need the STH.
-	rawSel := req.GetLog()
-	if rawSel == nil || (len(rawSel.GetLogId()) == 0 && rawSel.GetMonitoringUrl() == "") {
-		return nil, status.Error(codes.InvalidArgument, "log selector needs log_id or monitoring_url")
-	}
-	slug := logSlug(&pb.LogMeta{LogId: rawSel.GetLogId(), MonitoringUrl: rawSel.GetMonitoringUrl()})
-
-	ranges, files, err := scanPartitionRanges(req.GetOutputRoot(), slug)
+	// output_root is per-log (the caller owns the log-level prefix), so the disk
+	// scan needs no log identity — just count every partition file under it.
+	ranges, files, err := scanPartitionRanges(req.GetOutputRoot())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "scan %s: %v", req.GetOutputRoot(), err)
 	}
@@ -280,11 +274,11 @@ func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageReques
 	// Optionally query the live STH for tree_size/coverage. The disk-derived
 	// stats don't depend on it, so an STH failure (e.g. the log rate-limiting us
 	// while a mirror is running) degrades to disk-only with sth_error set, rather
-	// than failing the whole call.
+	// than failing the whole call. Only this path needs the log selector.
 	var treeSize int64
 	var sthErr string
 	if req.GetQuerySth() {
-		if sel, err := s.resolveSelector(ctx, rawSel); err != nil {
+		if sel, err := s.resolveSelector(ctx, req.GetLog()); err != nil {
 			sthErr = err.Error()
 		} else if sth, err := s.fetchSTH(ctx, sel); err != nil {
 			sthErr = err.Error()

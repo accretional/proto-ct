@@ -831,11 +831,11 @@ func (x *IndexRange) GetEnd() int64 {
 
 type CheckCoverageRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Identifies the log; only log_id (preferred) or monitoring_url is needed to
-	// locate the on-disk partitions. query_sth additionally needs enough to fetch
-	// the STH (resolved via the log list when only log_id is given).
+	// The log selector is only needed when query_sth is set (to fetch the STH;
+	// resolved via the log list when only log_id is given). The disk scan does not
+	// use it — output_root is a single log's prefix.
 	Log           *LogSelector `protobuf:"bytes,1,opt,name=log,proto3" json:"log,omitempty"`
-	OutputRoot    string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`     // base dir scanned for this log's partition files
+	OutputRoot    string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`     // a single log's output prefix, scanned recursively
 	QuerySth      bool         `protobuf:"varint,3,opt,name=query_sth,json=querySth,proto3" json:"query_sth,omitempty"`          // fetch current STH -> tree_size + coverage_pct + gaps vs live tree
 	IncludeGaps   bool         `protobuf:"varint,4,opt,name=include_gaps,json=includeGaps,proto3" json:"include_gaps,omitempty"` // return missing index ranges (for resume planning)
 	unknownFields protoimpl.UnknownFields

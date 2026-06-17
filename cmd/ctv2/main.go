@@ -167,10 +167,18 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 
 func runCoverage(ctx context.Context, cli pb.CTIngestionServiceClient) {
 	if *out == "" {
-		log.Fatalf("coverage mode needs -out (the output root to scan)")
+		log.Fatalf("coverage mode needs -out (the log's output root to scan)")
+	}
+	// The disk scan needs no log identity (-out is one log's prefix); a selector is
+	// only required to query the live STH.
+	var sel *pb.LogSelector
+	if *logIDHex != "" || *url != "" {
+		sel = selector()
+	} else if *covSTH {
+		log.Fatalf("coverage with -coverage-sth needs -log-id or -url; for disk-only coverage pass -coverage-sth=false")
 	}
 	resp, err := cli.CheckCoverage(ctx, &pb.CheckCoverageRequest{
-		Log:         selector(),
+		Log:         sel,
 		OutputRoot:  *out,
 		QuerySth:    *covSTH,
 		IncludeGaps: *covGaps,
