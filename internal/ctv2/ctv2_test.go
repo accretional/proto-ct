@@ -150,10 +150,10 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	if len(mw.files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
 	}
-	// Indices are base-36 encoded in filenames: 10->a, 11->b, 12->c.
+	// Paths are <day>/<first36>-<last36>.binpb (no log-id prefix); 10->a,11->b,12->c.
 	wantSuffixes := []string{
-		"/2024-03-15/" + encodeBase36(10) + "-" + encodeBase36(11) + ".binpb",
-		"/2024-03-16/" + encodeBase36(12) + "-" + encodeBase36(12) + ".binpb",
+		"2024-03-15/" + encodeBase36(10) + "-" + encodeBase36(11) + ".binpb",
+		"2024-03-16/" + encodeBase36(12) + "-" + encodeBase36(12) + ".binpb",
 	}
 	for _, suf := range wantSuffixes {
 		if !mw.has(suf) {
@@ -181,7 +181,7 @@ func TestBatchSink_DisjointBatchesSameDay(t *testing.T) {
 	if len(mw.files) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(mw.files), keys(mw.files))
 	}
-	if !mw.has("/2024-03-15/0-1.binpb") || !mw.has("/2024-03-15/2-3.binpb") {
+	if !mw.has("2024-03-15/0-1.binpb") || !mw.has("2024-03-15/2-3.binpb") {
 		t.Errorf("expected 0-1 and 2-3 files, got %v", keys(mw.files))
 	}
 }
@@ -365,9 +365,7 @@ func TestSummarizeRanges(t *testing.T) {
 }
 
 func TestScanPartitionRanges(t *testing.T) {
-	root := t.TempDir()
-	slug := "deadbeef"
-	// two chunk dirs, each with the slug subtree (mirrors the chunked driver layout)
+	root := t.TempDir() // a single log's output prefix
 	mk := func(rel string) {
 		p := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -377,13 +375,13 @@ func TestScanPartitionRanges(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mk("chunk_a/deadbeef/2024-01-01/0-9.binpb") // [0,10)
-	mk("chunk_a/deadbeef/2024-01-02/a-j.binpb") // [10,20)
-	mk("chunk_b/deadbeef/2024-01-03/k-t.binpb") // [20,30)
-	mk("chunk_b/otherlog/2024-01-03/0-9.binpb") // different slug -> ignored
-	mk("chunk_a/deadbeef/2024-01-01/notes.txt") // not binpb -> ignored
+	// per-chunk subdirs + flat day partitions both scanned at any depth
+	mk("chunk_a/2024-01-01/0-9.binpb") // [0,10)
+	mk("chunk_a/2024-01-02/a-j.binpb") // [10,20)
+	mk("chunk_b/2024-01-03/k-t.binpb") // [20,30)
+	mk("chunk_a/2024-01-01/notes.txt") // not binpb -> ignored
 
-	ranges, files, err := scanPartitionRanges(root, slug)
+	ranges, files, err := scanPartitionRanges(root)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}

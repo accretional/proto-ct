@@ -71,6 +71,13 @@ message GetLogEntriesRequest {
   string output_root = 8;                 // base dir for written partitions
   PartitionGranularity granularity = 9;    // default DAY
   bool verify = 10;                        // verify checkpoint/inclusion (default off for raw reads)
+
+  // Close the connection after each HTTP request (no keep-alive). DigiCert runs
+  // N Nginx servers per shard, each limited to ~1 req/s, and a persistent
+  // connection pins to one server; closing connections lets the load balancer
+  // re-roll requests across all servers (rfc6962 path). Costs a TLS handshake
+  // per request, so leave off for fast logs; on for DigiCert. Default: off.
+  bool disable_keep_alive = 11;
 }
 
 message GetLogEntriesResponse {
@@ -142,11 +149,11 @@ message IndexRange {
 }
 
 message CheckCoverageRequest {
-  // Identifies the log; only log_id (preferred) or monitoring_url is needed to
-  // locate the on-disk partitions. query_sth additionally needs enough to fetch
-  // the STH (resolved via the log list when only log_id is given).
+  // The log selector is only needed when query_sth is set (to fetch the STH;
+  // resolved via the log list when only log_id is given). The disk scan does not
+  // use it — output_root is a single log's prefix.
   LogSelector log = 1;
-  string output_root = 2;  // base dir scanned for this log's partition files
+  string output_root = 2;  // a single log's output prefix, scanned recursively
   bool query_sth = 3;      // fetch current STH -> tree_size + coverage_pct + gaps vs live tree
   bool include_gaps = 4;   // return missing index ranges (for resume planning)
 }

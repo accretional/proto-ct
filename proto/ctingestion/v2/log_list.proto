@@ -15,7 +15,12 @@ option go_package = "github.com/accretional/proto-ct/gen/ctingestion/v2";
 enum LogProtocol {
   LOG_PROTOCOL_UNSPECIFIED = 0;
   LOG_PROTOCOL_RFC6962 = 1;       // get-entries (certificate-transparency-go client)
-  LOG_PROTOCOL_STATIC_CT_API = 2; // c2sp.org/static-ct-api tiles (filippo.io/sunlight)
+  LOG_PROTOCOL_STATIC_CT_API = 2; // c2sp.org/static-ct-api tiles (filippo.io/sunlight), authenticated via checkpoint
+  // Reads static-ct-api data tiles (256 entries/request) but the log serves NO
+  // signed checkpoint; the tree size comes from the log's RFC6962 get-sth instead.
+  // Covers experimental tile front-ends on RFC6962 logs (e.g. TrustAsia's
+  // log2026a/b) — ~8x the entries/request of get-entries, but unauthenticated.
+  LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT = 3;
 }
 
 // CTLogState mirrors loglist3's mutually-exclusive log states.

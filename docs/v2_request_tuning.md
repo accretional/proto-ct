@@ -21,8 +21,8 @@ This doc consolidates the measurements taken 2026-06-16 and gives concrete recom
 | **Google** | rfc6962 (argon) | **32** | (cap 32) | ~4,000 cold / ~5,800 warm | hard knee at 32 |
 | **IPng** | static (halloumi) | **32** | n/a (tiles) | ~3,800 e/s | plateaus at 32 |
 | **Cloudflare** | rfc6962 (nimbus) | ~32–64 (re-test) | 256 | ~1,300 e/s | throttled in testing; needs clean re-test |
-| **DigiCert** | rfc6962 (wyvern) | 8–16 | **256-aligned** | ~200→~310 e/s | request-rate-limited; alignment ~doubles it |
-| **TrustAsia** | rfc6962 | 8–16 | (cap 32) | ~220 e/s | hard entries-rate-capped; nothing helps |
+| **DigiCert** | rfc6962 (wyvern) | 16+ | **256-aligned** | ~370 → **~1,825** e/s | **disable HTTP keep-alive** (~5×) + 256-align; see [DigiCert keep-alive](#digicert-disable-http-keep-alive-the-5-fix) |
+| **TrustAsia** | rfc6962 → **tiles** | 32 | (cap 32) | ~220 → **~1,300** e/s | get-entries hard-capped; use the experimental **tile interface** (~6×) — see [TrustAsia tiles](#trustasia-experimental-tile-interface-the-6-workaround) |
 
 **Universal rule:** keep `page_size` a multiple of **256** and start ranges on 256-aligned
 indices (see [256 alignment](#the-256-alignment-effect)). 256 is also the static-ct-api tile size,
@@ -128,6 +128,63 @@ combined with a 256-aligned start, is the ideal for DigiCert.
 
 ---
 
+## TrustAsia: experimental tile interface (the ~6× workaround)
+
+TrustAsia's get-entries is hard-capped (32 entries/request → ~220 e/s, untunable), but they layer
+an experimental **static-ct-api tile front-end on the same RFC6962 logs** — `/tile/data/<N>`
+(256 entries/request) + `/issuer/<hash>` — on `ct2026-a.trustasia.com/log2026a` and
+`ct2026-b.trustasia.com/log2026b` (ct-policy thread `LNvmpQUsKF8`). That's ~8× the entries/request
+of get-entries.
+
+It serves tiles + issuers but **no signed checkpoint** (`/checkpoint` 404s), so the normal
+sunlight static path (which authenticates against a checkpoint) can't use it. v2's **tile fetcher**
+(`LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT`, CLI `-protocol tiles`) handles this: it reads
+`/tile/data` directly and takes the tree size from the log's RFC6962 `get-sth` instead of a
+checkpoint.
+
+    ctv2 -mode fetch -url https://ct2026-a.trustasia.com/log2026a -protocol tiles \
+      -start <256-aligned> -end <256-aligned> -concurrency 32
+
+**Measured:** ~**1,301 entries/s** @ conc 32 vs ~220 e/s get-entries — **~6×**. Records come out
+static-style (leaf + chain *fingerprints*, ~2.6 KB/entry) so they're also smaller than
+get-entries' full-chain records.
+
+Caveats: **unauthenticated** (no checkpoint / inclusion proof — fine for a raw archiver, but note
+it); **no partial tiles**, so the frontier stops at the last full 256-tile; experimental endpoint
+(~3% transient tile errors observed → the fetcher retries). No public key needed.
+
+When a TrustAsia log has a *real* static log in the loglist with a working checkpoint (e.g.
+`luoshu2027`), prefer the authenticated `static` path there; use `tiles` for the RFC6962-only
+shards (`log2026a/b`) where only the checkpoint-less tile front-end exists.
+
+This pattern generalizes: **any RFC6962 log that exposes static tiles but no checkpoint** can be
+mirrored far faster via `-protocol tiles` than via its get-entries endpoint.
+
+---
+
+## DigiCert: disable HTTP keep-alive (the ~5× fix)
+
+DigiCert runs **N Nginx servers per shard, each limited to ~1 req/s**, behind a load balancer
+(ct-policy thread `lTqtb4WHsqo`). A **persistent (keep-alive) connection pins to one server**, so
+connection reuse caps you at ~1 req/s and triggers 429s — which is why our default client (Go
+keep-alive + connection pooling) only managed ~370 e/s. Closing the connection after each request
+lets the load balancer **re-roll each request across all servers**; combined with concurrency,
+requests spread over the whole pool.
+
+Use `-no-keepalive` (sets `Transport.DisableKeepAlives`, rfc6962 path):
+
+    ctv2 -mode fetch -url https://wyvern.ct.digicert.com/2026h1/ -protocol rfc6962 \
+      -start <256-aligned> -end <256-aligned> -concurrency 16 -page-size 256 -no-keepalive
+
+**Measured (conc 16, 256-aligned, 30 s):** keep-alive **371 e/s** → `-no-keepalive` **1,825 e/s**
+(**~4.9×**). Best combined with 256-alignment (DigiCert returns a full 256 only on aligned starts)
+and concurrency ≥ the server count to cover the pool.
+
+Trade-off: a TLS handshake per request, so it's **off by default** — only worth it for logs that
+throttle persistent connections (DigiCert today; possibly others that 429 under keep-alive).
+
+---
+
 ## Bandwidth & entry size
 
 - This host sustained **~20–26 MB/s** (Google rfc6962 ~23 MB/s, Sectigo ~26 MB/s, LE static
@@ -143,10 +200,11 @@ combined with a 256-aligned start, is the ideal for DigiCert.
 
 - **Fast first:** the static providers (Let's Encrypt, Geomys, IPng) and Sectigo are where
   throughput lives; target them for bulk work.
-- **Slow / long-pole:** DigiCert (~310 e/s tuned) and TrustAsia (~220 e/s, untunable) gate any
-  full mirror — DigiCert 1.2B ≈ 45 days, TrustAsia 2B ≈ 100+ days at these rates. For these,
-  prefer recent/targeted ranges over full history.
-- **Always** align ranges + `page_size` to 256.
+- **Previously-slow providers, now tunable:** DigiCert ~370 → **~1,825 e/s** with `-no-keepalive`
+  (+256-align); TrustAsia ~220 → **~1,300 e/s** via `-protocol tiles`. Neither is a hard long-pole
+  anymore — see their sections. (Full 1–2 B mirrors are still large, but no longer rate-gated.)
+- **Always** align ranges + `page_size` to 256; **add `-no-keepalive` for DigiCert** (and any log
+  that 429s under persistent connections).
 - **Distributed fan-out:** since per-provider ceilings differ by ~100×, schedule per provider —
   one slow provider should not hold up the fast ones.
 

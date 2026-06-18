@@ -204,6 +204,12 @@ type GetLogEntriesRequest struct {
 	OutputRoot       string               `protobuf:"bytes,8,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`                           // base dir for written partitions
 	Granularity      PartitionGranularity `protobuf:"varint,9,opt,name=granularity,proto3,enum=ctingestion.v2.PartitionGranularity" json:"granularity,omitempty"` // default DAY
 	Verify           bool                 `protobuf:"varint,10,opt,name=verify,proto3" json:"verify,omitempty"`                                                   // verify checkpoint/inclusion (default off for raw reads)
+	// Close the connection after each HTTP request (no keep-alive). DigiCert runs
+	// N Nginx servers per shard, each limited to ~1 req/s, and a persistent
+	// connection pins to one server; closing connections lets the load balancer
+	// re-roll requests across all servers (rfc6962 path). Costs a TLS handshake
+	// per request, so leave off for fast logs; on for DigiCert. Default: off.
+	DisableKeepAlive bool `protobuf:"varint,11,opt,name=disable_keep_alive,json=disableKeepAlive,proto3" json:"disable_keep_alive,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -304,6 +310,13 @@ func (x *GetLogEntriesRequest) GetGranularity() PartitionGranularity {
 func (x *GetLogEntriesRequest) GetVerify() bool {
 	if x != nil {
 		return x.Verify
+	}
+	return false
+}
+
+func (x *GetLogEntriesRequest) GetDisableKeepAlive() bool {
+	if x != nil {
+		return x.DisableKeepAlive
 	}
 	return false
 }
@@ -831,11 +844,11 @@ func (x *IndexRange) GetEnd() int64 {
 
 type CheckCoverageRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Identifies the log; only log_id (preferred) or monitoring_url is needed to
-	// locate the on-disk partitions. query_sth additionally needs enough to fetch
-	// the STH (resolved via the log list when only log_id is given).
+	// The log selector is only needed when query_sth is set (to fetch the STH;
+	// resolved via the log list when only log_id is given). The disk scan does not
+	// use it — output_root is a single log's prefix.
 	Log           *LogSelector `protobuf:"bytes,1,opt,name=log,proto3" json:"log,omitempty"`
-	OutputRoot    string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`     // base dir scanned for this log's partition files
+	OutputRoot    string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`     // a single log's output prefix, scanned recursively
 	QuerySth      bool         `protobuf:"varint,3,opt,name=query_sth,json=querySth,proto3" json:"query_sth,omitempty"`          // fetch current STH -> tree_size + coverage_pct + gaps vs live tree
 	IncludeGaps   bool         `protobuf:"varint,4,opt,name=include_gaps,json=includeGaps,proto3" json:"include_gaps,omitempty"` // return missing index ranges (for resume planning)
 	unknownFields protoimpl.UnknownFields
@@ -1015,7 +1028,7 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\x0emonitoring_url\x18\x02 \x01(\tR\rmonitoringUrl\x127\n" +
 	"\bprotocol\x18\x03 \x01(\x0e2\x1b.ctingestion.v2.LogProtocolR\bprotocol\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x04 \x01(\fR\tpublicKey\"\x8c\x03\n" +
+	"public_key\x18\x04 \x01(\fR\tpublicKey\"\xba\x03\n" +
 	"\x14GetLogEntriesRequest\x12-\n" +
 	"\x03log\x18\x01 \x01(\v2\x1b.ctingestion.v2.LogSelectorR\x03log\x12\x1f\n" +
 	"\vstart_index\x18\x02 \x01(\x03R\n" +
@@ -1031,7 +1044,8 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"outputRoot\x12F\n" +
 	"\vgranularity\x18\t \x01(\x0e2$.ctingestion.v2.PartitionGranularityR\vgranularity\x12\x16\n" +
 	"\x06verify\x18\n" +
-	" \x01(\bR\x06verify\"\xb7\x01\n" +
+	" \x01(\bR\x06verify\x12,\n" +
+	"\x12disable_keep_alive\x18\v \x01(\bR\x10disableKeepAlive\"\xb7\x01\n" +
 	"\x15GetLogEntriesResponse\x12'\n" +
 	"\x0fentries_written\x18\x01 \x01(\x03R\x0eentriesWritten\x12#\n" +
 	"\rbytes_written\x18\x02 \x01(\x03R\fbytesWritten\x12\x1f\n" +

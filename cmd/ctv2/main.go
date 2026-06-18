@@ -40,6 +40,7 @@ var (
 	concurrency = flag.Int("concurrency", 0, "fetch concurrency (static path)")
 	pageSize    = flag.Int("page-size", 0, "get-entries page size hint (rfc6962)")
 	granularity = flag.String("granularity", "day", "partition granularity: day | hour")
+	noKeepAlive = flag.Bool("no-keepalive", false, "close each HTTP connection (no keep-alive); needed for DigiCert (rfc6962)")
 	userAgent   = flag.String("user-agent", "", "override User-Agent")
 	timeout     = flag.Duration("timeout", time.Hour, "overall RPC timeout")
 	covSTH      = flag.Bool("coverage-sth", true, "coverage mode: query the live STH for tree_size + coverage%%")
@@ -89,8 +90,12 @@ func selector() *pb.LogSelector {
 			sel.Protocol = pb.LogProtocol_LOG_PROTOCOL_RFC6962
 		case "static":
 			sel.Protocol = pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API
+		case "tiles":
+			// static-ct-api data tiles over a log with no checkpoint (tree from
+			// RFC6962 get-sth); e.g. TrustAsia's experimental tile interface.
+			sel.Protocol = pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT
 		default:
-			log.Fatalf("-url requires -protocol rfc6962|static")
+			log.Fatalf("-url requires -protocol rfc6962|static|tiles")
 		}
 	}
 	if *pubKeyB64 != "" {
@@ -156,6 +161,7 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 		UserAgent:        ua,
 		OutputRoot:       *out,
 		Granularity:      gran(),
+		DisableKeepAlive: *noKeepAlive,
 	})
 	if err != nil {
 		log.Fatalf("GetLogEntries: %v", err)
@@ -167,10 +173,18 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 
 func runCoverage(ctx context.Context, cli pb.CTIngestionServiceClient) {
 	if *out == "" {
-		log.Fatalf("coverage mode needs -out (the output root to scan)")
+		log.Fatalf("coverage mode needs -out (the log's output root to scan)")
+	}
+	// The disk scan needs no log identity (-out is one log's prefix); a selector is
+	// only required to query the live STH.
+	var sel *pb.LogSelector
+	if *logIDHex != "" || *url != "" {
+		sel = selector()
+	} else if *covSTH {
+		log.Fatalf("coverage with -coverage-sth needs -log-id or -url; for disk-only coverage pass -coverage-sth=false")
 	}
 	resp, err := cli.CheckCoverage(ctx, &pb.CheckCoverageRequest{
-		Log:         selector(),
+		Log:         sel,
 		OutputRoot:  *out,
 		QuerySth:    *covSTH,
 		IncludeGaps: *covGaps,

@@ -3,6 +3,7 @@ package ctv2
 import (
 	"context"
 	"net/http"
+	"time"
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"golang.org/x/time/rate"
@@ -39,17 +40,22 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return base.RoundTrip(req)
 }
 
-// rateLimitedClient returns an *http.Client whose requests are rate-limited to
-// qps (0 = no limit, returns nil so the caller's library default is used).
-func rateLimitedClient(qps float64) *http.Client {
-	if qps <= 0 {
-		return nil
-	}
+// httpClientFor builds the fetcher HTTP client. qps>0 adds a rate limiter.
+// disableKeepAlive forces a new connection per request — needed for DigiCert,
+// whose per-Nginx-server ~1 req/s limit pins a persistent connection to one
+// server; closing connections re-rolls the load balancer across all its servers.
+// (Costs a TLS handshake per request, so it's off by default.)
+func httpClientFor(qps float64, disableKeepAlive bool) *http.Client {
 	tr := &http.Transport{
 		MaxIdleConnsPerHost: 512,
 		MaxConnsPerHost:     512,
+		DisableKeepAlives:   disableKeepAlive,
 	}
-	return &http.Client{
-		Transport: &rateLimitedTransport{base: tr, lim: rate.NewLimiter(rate.Limit(qps), int(qps)+1)},
+	c := &http.Client{Timeout: 60 * time.Second}
+	if qps > 0 {
+		c.Transport = &rateLimitedTransport{base: tr, lim: rate.NewLimiter(rate.Limit(qps), int(qps)+1)}
+	} else {
+		c.Transport = tr
 	}
+	return c
 }

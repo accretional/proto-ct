@@ -28,7 +28,12 @@ type LogProtocol int32
 const (
 	LogProtocol_LOG_PROTOCOL_UNSPECIFIED   LogProtocol = 0
 	LogProtocol_LOG_PROTOCOL_RFC6962       LogProtocol = 1 // get-entries (certificate-transparency-go client)
-	LogProtocol_LOG_PROTOCOL_STATIC_CT_API LogProtocol = 2 // c2sp.org/static-ct-api tiles (filippo.io/sunlight)
+	LogProtocol_LOG_PROTOCOL_STATIC_CT_API LogProtocol = 2 // c2sp.org/static-ct-api tiles (filippo.io/sunlight), authenticated via checkpoint
+	// Reads static-ct-api data tiles (256 entries/request) but the log serves NO
+	// signed checkpoint; the tree size comes from the log's RFC6962 get-sth instead.
+	// Covers experimental tile front-ends on RFC6962 logs (e.g. TrustAsia's
+	// log2026a/b) — ~8x the entries/request of get-entries, but unauthenticated.
+	LogProtocol_LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT LogProtocol = 3
 )
 
 // Enum value maps for LogProtocol.
@@ -37,11 +42,13 @@ var (
 		0: "LOG_PROTOCOL_UNSPECIFIED",
 		1: "LOG_PROTOCOL_RFC6962",
 		2: "LOG_PROTOCOL_STATIC_CT_API",
+		3: "LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT",
 	}
 	LogProtocol_value = map[string]int32{
-		"LOG_PROTOCOL_UNSPECIFIED":   0,
-		"LOG_PROTOCOL_RFC6962":       1,
-		"LOG_PROTOCOL_STATIC_CT_API": 2,
+		"LOG_PROTOCOL_UNSPECIFIED":                 0,
+		"LOG_PROTOCOL_RFC6962":                     1,
+		"LOG_PROTOCOL_STATIC_CT_API":               2,
+		"LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT": 3,
 	}
 )
 
@@ -484,11 +491,12 @@ const file_ctingestion_v2_log_list_proto_rawDesc = "" +
 	"\x11temporal_interval\x18\f \x01(\v2 .ctingestion.v2.TemporalIntervalR\x10temporalInterval\"j\n" +
 	"\x10TemporalInterval\x12,\n" +
 	"\x12start_inclusive_ms\x18\x01 \x01(\x03R\x10startInclusiveMs\x12(\n" +
-	"\x10end_exclusive_ms\x18\x02 \x01(\x03R\x0eendExclusiveMs*e\n" +
+	"\x10end_exclusive_ms\x18\x02 \x01(\x03R\x0eendExclusiveMs*\x93\x01\n" +
 	"\vLogProtocol\x12\x1c\n" +
 	"\x18LOG_PROTOCOL_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14LOG_PROTOCOL_RFC6962\x10\x01\x12\x1e\n" +
-	"\x1aLOG_PROTOCOL_STATIC_CT_API\x10\x02*\xc9\x01\n" +
+	"\x1aLOG_PROTOCOL_STATIC_CT_API\x10\x02\x12,\n" +
+	"(LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT\x10\x03*\xc9\x01\n" +
 	"\n" +
 	"CTLogState\x12\x1c\n" +
 	"\x18CT_LOG_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
