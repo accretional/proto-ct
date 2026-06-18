@@ -231,6 +231,8 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		fetcher, err = newRFC6962Fetcher(sel, ua, req.GetTargetQps(), int(req.GetPageSize()), int(req.GetFetchConcurrency()))
 	case pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API:
 		fetcher, err = newStaticFetcher(sel, ua, req.GetTargetQps(), int(req.GetFetchConcurrency()), int(req.GetPageSize()))
+	case pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT:
+		fetcher, err = newTileFetcher(sel, ua, req.GetTargetQps(), int(req.GetFetchConcurrency()))
 	default:
 		return nil, status.Error(codes.InvalidArgument, "unknown or unspecified log protocol")
 	}

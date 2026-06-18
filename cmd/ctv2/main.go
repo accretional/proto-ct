@@ -89,8 +89,12 @@ func selector() *pb.LogSelector {
 			sel.Protocol = pb.LogProtocol_LOG_PROTOCOL_RFC6962
 		case "static":
 			sel.Protocol = pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API
+		case "tiles":
+			// static-ct-api data tiles over a log with no checkpoint (tree from
+			// RFC6962 get-sth); e.g. TrustAsia's experimental tile interface.
+			sel.Protocol = pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT
 		default:
-			log.Fatalf("-url requires -protocol rfc6962|static")
+			log.Fatalf("-url requires -protocol rfc6962|static|tiles")
 		}
 	}
 	if *pubKeyB64 != "" {
