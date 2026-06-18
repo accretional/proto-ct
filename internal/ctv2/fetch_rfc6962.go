@@ -3,9 +3,7 @@ package ctv2
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"sync"
-	"time"
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"github.com/google/certificate-transparency-go/client"
@@ -26,14 +24,8 @@ type rfc6962Fetcher struct {
 	parallel  int
 }
 
-func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageSize, concurrency int) (*rfc6962Fetcher, error) {
-	hc := rateLimitedClient(qps)
-	if hc == nil {
-		hc = &http.Client{
-			Transport: &http.Transport{MaxIdleConnsPerHost: 512, MaxConnsPerHost: 512},
-			Timeout:   60 * time.Second,
-		}
-	}
+func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageSize, concurrency int, disableKeepAlive bool) (*rfc6962Fetcher, error) {
+	hc := httpClientFor(qps, disableKeepAlive)
 	opts := jsonclient.Options{UserAgent: userAgent}
 	if len(sel.GetPublicKey()) > 0 {
 		opts.PublicKeyDER = sel.GetPublicKey()

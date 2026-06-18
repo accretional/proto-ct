@@ -36,13 +36,7 @@ func newTileFetcher(sel *pb.LogSelector, userAgent string, qps float64, concurre
 	if base == "" {
 		return nil, fmt.Errorf("tile fetcher needs monitoring_url (the log's base, serving /tile/data and /ct/v1/get-sth)")
 	}
-	hc := rateLimitedClient(qps)
-	if hc == nil {
-		hc = &http.Client{
-			Transport: &http.Transport{MaxIdleConnsPerHost: 512, MaxConnsPerHost: 512},
-			Timeout:   60 * time.Second,
-		}
-	}
+	hc := httpClientFor(qps, false) // tiles are CDN-served; keep-alive is fine
 	lc, err := client.New(base, hc, jsonclient.Options{UserAgent: userAgent})
 	if err != nil {
 		return nil, fmt.Errorf("new rfc6962 client (for get-sth): %w", err)

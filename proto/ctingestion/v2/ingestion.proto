@@ -71,6 +71,13 @@ message GetLogEntriesRequest {
   string output_root = 8;                 // base dir for written partitions
   PartitionGranularity granularity = 9;    // default DAY
   bool verify = 10;                        // verify checkpoint/inclusion (default off for raw reads)
+
+  // Close the connection after each HTTP request (no keep-alive). DigiCert runs
+  // N Nginx servers per shard, each limited to ~1 req/s, and a persistent
+  // connection pins to one server; closing connections lets the load balancer
+  // re-roll requests across all servers (rfc6962 path). Costs a TLS handshake
+  // per request, so leave off for fast logs; on for DigiCert. Default: off.
+  bool disable_keep_alive = 11;
 }
 
 message GetLogEntriesResponse {

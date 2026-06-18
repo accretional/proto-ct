@@ -35,7 +35,7 @@ func newStaticFetcher(sel *pb.LogSelector, userAgent string, qps float64, concur
 		PublicKey:        pub,
 		UserAgent:        userAgent,
 		ConcurrencyLimit: concurrency,
-		HTTPClient:       rateLimitedClient(qps),
+		HTTPClient:       httpClientFor(qps, false),
 	}
 	c, err := sunlight.NewClient(cfg)
 	if err != nil {

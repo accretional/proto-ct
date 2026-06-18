@@ -40,6 +40,7 @@ var (
 	concurrency = flag.Int("concurrency", 0, "fetch concurrency (static path)")
 	pageSize    = flag.Int("page-size", 0, "get-entries page size hint (rfc6962)")
 	granularity = flag.String("granularity", "day", "partition granularity: day | hour")
+	noKeepAlive = flag.Bool("no-keepalive", false, "close each HTTP connection (no keep-alive); needed for DigiCert (rfc6962)")
 	userAgent   = flag.String("user-agent", "", "override User-Agent")
 	timeout     = flag.Duration("timeout", time.Hour, "overall RPC timeout")
 	covSTH      = flag.Bool("coverage-sth", true, "coverage mode: query the live STH for tree_size + coverage%%")
@@ -160,6 +161,7 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 		UserAgent:        ua,
 		OutputRoot:       *out,
 		Granularity:      gran(),
+		DisableKeepAlive: *noKeepAlive,
 	})
 	if err != nil {
 		log.Fatalf("GetLogEntries: %v", err)
