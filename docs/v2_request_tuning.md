@@ -11,7 +11,31 @@ This doc consolidates the measurements taken 2026-06-16 and gives concrete recom
 
 ---
 
-## TL;DR — per-operator settings
+## Request parameters per provider
+
+`GetLogEntriesRequest` field values per operator (`log` is a `LogSelector`; `LogProtocol` values
+below omit their `LOG_PROTOCOL_` prefix). **Universal:** set `start_index`/`end_index` on 256-aligned
+boundaries and `page_size` to a multiple of 256 (0 = default 256; on static logs `page_size` only
+sets on-disk file size, not throughput). Default-valued fields are omitted.
+
+| Operator | `log.protocol` | `fetch_concurrency` | other request fields | ~e/s |
+|---|---|---|---|---|
+| Let's Encrypt | `STATIC_CT_API` | `64` | — | ~20,700 |
+| Sectigo | `RFC6962` | `128` | — | ~17,000 |
+| Geomys | `STATIC_CT_API` | `96` | — | ~16,600 |
+| Google | `RFC6962` | `32` | — | ~5,000 |
+| IPng | `STATIC_CT_API` | `32` | — | ~3,800 |
+| **Cloudflare** | `RFC6962` | `16` | `target_qps = 8` | ~2,077 |
+| **DigiCert** | `RFC6962` | `16` | `disable_keep_alive = true` | ~1,825 |
+| **TrustAsia** | `STATIC_CT_API_NO_CHECKPOINT` | `32` | `log.monitoring_url = "https://ct2026-a.trustasia.com/log2026a"` | ~1,300 |
+
+Identify the log with `log.log_id` (resolved against the cached log list for protocol/URL/key);
+the `STATIC_CT_API_NO_CHECKPOINT` path additionally requires an explicit `log.monitoring_url`. The
+detail table and per-provider sections below explain the *why*.
+
+---
+
+## Per-operator detail
 
 | Operator | Protocol | Concurrency | page_size | Observed best | Notes |
 |---|---|---|---|---|---|
