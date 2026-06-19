@@ -20,7 +20,7 @@ This doc consolidates the measurements taken 2026-06-16 and gives concrete recom
 | **Geomys** | static (skylight) | **96–128** | n/a (tiles) | ~16,600 e/s | climbing, diminishing returns |
 | **Google** | rfc6962 (argon) | **32** | (cap 32) | ~4,000 cold / ~5,800 warm | hard knee at 32 |
 | **IPng** | static (halloumi) | **32** | n/a (tiles) | ~3,800 e/s | plateaus at 32 |
-| **Cloudflare** | rfc6962 (nimbus) | ~32–64 (re-test) | 256 | ~1,300 e/s | throttled in testing; needs clean re-test |
+| **Cloudflare** | rfc6962 (nimbus) | 16 + **`-qps 8`** | 256 | **~2,077 e/s** (stable) | **self-throttle to < 10 req/s** or get a 1-min block; see [Cloudflare](#cloudflare-self-throttle-under-the-rate-limit) |
 | **DigiCert** | rfc6962 (wyvern) | 16+ | **256-aligned** | ~370 → **~1,825** e/s | **disable HTTP keep-alive** (~5×) + 256-align; see [DigiCert keep-alive](#digicert-disable-http-keep-alive-the-5-fix) |
 | **TrustAsia** | rfc6962 → **tiles** | 32 | (cap 32) | ~220 → **~1,300** e/s | get-entries hard-capped; use the experimental **tile interface** (~6×) — see [TrustAsia tiles](#trustasia-experimental-tile-interface-the-6-workaround) |
 
@@ -185,6 +185,35 @@ throttle persistent connections (DigiCert today; possibly others that 429 under 
 
 ---
 
+## Cloudflare: self-throttle under the rate limit
+
+Cloudflare (nimbus) enforces **100 requests per 10 s per IP (= 10 req/s), with a 1-minute IP block
+when exceeded** (per a Cloudflare rep on ct-policy, Apr 2024). Their 2024 note assumed a **1024**
+get-entries batch (→ ~36M entries/hr), but nimbus now returns only **256/request** (verified), so
+today's per-IP ceiling is **10 req/s × 256 ≈ 2,560 e/s** — the 1024→256 downgrade quartered it.
+
+Naively bursting (high concurrency, no rate limit) repeatedly trips the 10 req/s line and earns the
+1-min block, which is why earlier runs were erratic (~1,000 e/s with frequent zeros). The fix is
+**client-side `target_qps`** to stay safely under 10 req/s. Measured (conc 16, page 256, 30 s):
+
+| `-qps` | req/s | result |
+|---|---|---|
+| 4 | 4 | ~985 e/s, stable |
+| **8** | 8 | **~2,077 e/s, stable (no failures)** |
+| 10 | 10 | erratic (1,278 / 0) — at the limit, jitter trips the block |
+| 12–16 | >10 | collapses to ~300 e/s — **1-min block** |
+
+Use `-qps 8` (≈2× the uncapped result, fully stable):
+
+    ctv2 -mode fetch -log-id <nimbus> -concurrency 16 -qps 8 -page-size 256 …
+
+`qps 10` is *at* the policy line and unstable (the limiter's burst + timing jitter tip over
+100/10 s); keep margin. No keep-alive trick or tile interface helps here (Cloudflare is rfc6962-only
+and resets via HTTP/2 RST_STREAM). General lesson: **for an IP-rate-limited log, a client-side qps
+cap just under the limit beats high concurrency** — concurrency above the cap only causes blocks.
+
+---
+
 ## Bandwidth & entry size
 
 - This host sustained **~20–26 MB/s** (Google rfc6962 ~23 MB/s, Sectigo ~26 MB/s, LE static
@@ -201,10 +230,11 @@ throttle persistent connections (DigiCert today; possibly others that 429 under 
 - **Fast first:** the static providers (Let's Encrypt, Geomys, IPng) and Sectigo are where
   throughput lives; target them for bulk work.
 - **Previously-slow providers, now tunable:** DigiCert ~370 → **~1,825 e/s** with `-no-keepalive`
-  (+256-align); TrustAsia ~220 → **~1,300 e/s** via `-protocol tiles`. Neither is a hard long-pole
-  anymore — see their sections. (Full 1–2 B mirrors are still large, but no longer rate-gated.)
-- **Always** align ranges + `page_size` to 256; **add `-no-keepalive` for DigiCert** (and any log
-  that 429s under persistent connections).
+  (+256-align); TrustAsia ~220 → **~1,300 e/s** via `-protocol tiles`; Cloudflare ~1,000 erratic →
+  **~2,077 e/s stable** with `-qps 8`. None is a hard long-pole anymore — see their sections.
+  (Full 1–2 B mirrors are still large, but no longer rate-gated.)
+- **Always** align ranges + `page_size` to 256; **`-no-keepalive` for DigiCert**; **`-qps 8` for
+  Cloudflare** (and a client qps cap for any IP-rate-limited log).
 - **Distributed fan-out:** since per-provider ceilings differ by ~100×, schedule per provider —
   one slow provider should not hold up the fast ones.
 
@@ -215,9 +245,12 @@ throttle persistent connections (DigiCert today; possibly others that 429 under 
 - Probes are coarse: fixed-30s cold windows, 1–2 trials, distinct cold offsets. The first
   per-operator sweep used single trials; the refinement used two. Exact knees would need more
   trials / same-range control per provider.
-- **Google and Cloudflare showed intermittent zero-throughput probes under sustained testing =
-  our-IP throttling.** Their numbers here are conservative; a clean re-test after a cooldown is
-  warranted, especially for Cloudflare.
+- **Google's** early zero-throughput probes under sustained testing were partly our-IP throttling;
+  its ~32 knee is from the controlled same-range test and is solid.
+- **Cloudflare was re-tested after a cooldown (2026-06):** still rate-limited (100 req/10 s/IP +
+  1-min block, not transient) — resolved by self-throttling to `-qps 8` (see the Cloudflare
+  section). The erratic numbers in the concurrency-sweep table above are pre-`qps`-cap and
+  superseded by that section.
 - The first cross-provider sweep confounded index-range with concurrency for some points; treat
   single-trial outliers (the `*` cells) as noise.
 - Numbers are point-in-time (2026-06-16) and vary with provider load and our network.
