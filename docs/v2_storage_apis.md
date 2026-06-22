@@ -4,7 +4,8 @@ How the two CT log APIs map into the v2 on-disk record (`RawLogEntry` / `RawLogE
 binary `.binpb`), why their per-entry sizes differ, and where we can shrink them. Measured
 2026-06-17 on the two test mirrors (argon2027h1 = rfc6962, tuscolo2027h1 = static).
 
-> Status: **proposal for review.** Nothing here is implemented yet.
+> Status: **O2 implemented** (static `certificate` field dropped — see below). O1/O3/O4
+> remain proposals; O1/O3 are gated on the open "do downstreams need the chain?" question.
 
 ## What each protocol actually stores
 
@@ -64,13 +65,15 @@ chain out of `extra_data`, dedupe, drop the verbatim copy.
 - **Cost:** no longer self-contained (need the issuer store to reconstruct full chains);
   added write-path step (parse + dedupe chains); breaks the "verbatim raw leaf" simplicity.
 
-### O2 — static: drop the redundant `certificate` field (cheap, immediate)
+### O2 — static: drop the redundant `certificate` field (cheap, immediate) — ✅ IMPLEMENTED
 Keep `leaf_input` (the canonical raw Merkle leaf, consistent with RFC6962 and needed for Merkle
 verification), drop `certificate` (derivable by parsing `leaf_input`). Keep `precertificate` for
 precerts.
 - **Impact:** ~−1.4 KB/entry ⇒ static ~3.1 KB → **~1.6 KB (~halved)**.
 - **Cost:** downstream tools must parse `leaf_input` to get the cert instead of reading a
   ready field (trivial; they'll parse leaves anyway).
+- **Done:** `RawLogEntry.certificate` (field 7) is now `reserved` in `ingestion.proto`;
+  `rawEntryFromStatic` no longer populates it. The leaf cert lives only in `leaf_input`.
 
 ### O3 — unify both protocols onto one minimal record
 End state of O1+O2: every record = `leaf_input` + `chain_fingerprints` (+ precert fields) +

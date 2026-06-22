@@ -37,8 +37,10 @@ func rawEntryFromRFC6962(index int64, leafInput, extraData []byte) (*pb.RawLogEn
 
 // rawEntryFromStatic builds a unified RawLogEntry from a sunlight LogEntry. The
 // reconstructed MerkleTreeLeaf is stored in leaf_input so the record shape
-// matches the RFC6962 path; the split certificate/chain fields are also kept
-// (static logs expose them directly).
+// matches the RFC6962 path. The leaf cert is NOT stored separately: it is already
+// embedded in leaf_input (storage opt O2), so we drop sunlight's split
+// Certificate field to avoid duplicating ~1.4 KB/entry. precertificate is kept
+// because the full submitted precert is not recoverable from leaf_input.
 func rawEntryFromStatic(e *sunlight.LogEntry) *pb.RawLogEntry {
 	r := &pb.RawLogEntry{
 		Index:          e.LeafIndex,
@@ -46,7 +48,6 @@ func rawEntryFromStatic(e *sunlight.LogEntry) *pb.RawLogEntry {
 		EntryType:      entryType(e.IsPrecert),
 		Source:         pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API,
 		LeafInput:      e.MerkleTreeLeaf(),
-		Certificate:    e.Certificate,
 		Precertificate: e.PreCertificate,
 	}
 	for _, fp := range e.ChainFingerprints {

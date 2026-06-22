@@ -228,7 +228,7 @@ func TestRawLogEntryBatch_BinaryRoundTrip(t *testing.T) {
 		Log: &pb.LogMeta{MonitoringUrl: "https://log.example/", Protocol: pb.LogProtocol_LOG_PROTOCOL_RFC6962},
 		Entries: []*pb.RawLogEntry{
 			{Index: 1, TimestampMs: 100, EntryType: pb.EntryType_ENTRY_TYPE_X509, LeafInput: []byte{1, 2, 3}, ExtraData: []byte{4}},
-			{Index: 2, TimestampMs: 200, EntryType: pb.EntryType_ENTRY_TYPE_PRECERT, Certificate: []byte{9}},
+			{Index: 2, TimestampMs: 200, EntryType: pb.EntryType_ENTRY_TYPE_PRECERT, Precertificate: []byte{9}},
 		},
 	}
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(batch)

@@ -401,11 +401,9 @@ type RawLogEntry struct {
 	EntryType   EntryType              `protobuf:"varint,3,opt,name=entry_type,json=entryType,proto3,enum=ctingestion.v2.EntryType" json:"entry_type,omitempty"`
 	Source      LogProtocol            `protobuf:"varint,4,opt,name=source,proto3,enum=ctingestion.v2.LogProtocol" json:"source,omitempty"`
 	// RFC 6962 verbatim.
-	LeafInput []byte `protobuf:"bytes,5,opt,name=leaf_input,json=leafInput,proto3" json:"leaf_input,omitempty"` // TLS-encoded MerkleTreeLeaf
-	ExtraData []byte `protobuf:"bytes,6,opt,name=extra_data,json=extraData,proto3" json:"extra_data,omitempty"` // cert chain / precert chain
-	// static-ct-api (sunlight LogEntry).
-	Certificate       []byte   `protobuf:"bytes,7,opt,name=certificate,proto3" json:"certificate,omitempty"`                                       // leaf cert DER (x509) or TBSCertificate (precert)
-	Precertificate    []byte   `protobuf:"bytes,8,opt,name=precertificate,proto3" json:"precertificate,omitempty"`                                 // precert chain entry pre_certificate
+	LeafInput         []byte   `protobuf:"bytes,5,opt,name=leaf_input,json=leafInput,proto3" json:"leaf_input,omitempty"`                          // TLS-encoded MerkleTreeLeaf
+	ExtraData         []byte   `protobuf:"bytes,6,opt,name=extra_data,json=extraData,proto3" json:"extra_data,omitempty"`                          // cert chain / precert chain
+	Precertificate    []byte   `protobuf:"bytes,8,opt,name=precertificate,proto3" json:"precertificate,omitempty"`                                 // precert chain entry pre_certificate (not in leaf_input)
 	IssuerKeyHash     []byte   `protobuf:"bytes,9,opt,name=issuer_key_hash,json=issuerKeyHash,proto3" json:"issuer_key_hash,omitempty"`            // precert issuer key hash
 	ChainFingerprints [][]byte `protobuf:"bytes,10,rep,name=chain_fingerprints,json=chainFingerprints,proto3" json:"chain_fingerprints,omitempty"` // SHA-256 of issuer chain certs
 	unknownFields     protoimpl.UnknownFields
@@ -480,13 +478,6 @@ func (x *RawLogEntry) GetLeafInput() []byte {
 func (x *RawLogEntry) GetExtraData() []byte {
 	if x != nil {
 		return x.ExtraData
-	}
-	return nil
-}
-
-func (x *RawLogEntry) GetCertificate() []byte {
-	if x != nil {
-		return x.Certificate
 	}
 	return nil
 }
@@ -1053,7 +1044,7 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"firstIndex\x12\x1d\n" +
 	"\n" +
 	"last_index\x18\x04 \x01(\x03R\tlastIndexJ\x04\b\x05\x10\x06R\n" +
-	"partitions\"\x94\x03\n" +
+	"partitions\"\x85\x03\n" +
 	"\vRawLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12!\n" +
 	"\ftimestamp_ms\x18\x02 \x01(\x03R\vtimestampMs\x128\n" +
@@ -1063,12 +1054,11 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\n" +
 	"leaf_input\x18\x05 \x01(\fR\tleafInput\x12\x1d\n" +
 	"\n" +
-	"extra_data\x18\x06 \x01(\fR\textraData\x12 \n" +
-	"\vcertificate\x18\a \x01(\fR\vcertificate\x12&\n" +
+	"extra_data\x18\x06 \x01(\fR\textraData\x12&\n" +
 	"\x0eprecertificate\x18\b \x01(\fR\x0eprecertificate\x12&\n" +
 	"\x0fissuer_key_hash\x18\t \x01(\fR\rissuerKeyHash\x12-\n" +
 	"\x12chain_fingerprints\x18\n" +
-	" \x03(\fR\x11chainFingerprints\"\x80\x01\n" +
+	" \x03(\fR\x11chainFingerprintsJ\x04\b\a\x10\bR\vcertificate\"\x80\x01\n" +
 	"\aLogMeta\x12\x15\n" +
 	"\x06log_id\x18\x01 \x01(\fR\x05logId\x12%\n" +
 	"\x0emonitoring_url\x18\x02 \x01(\tR\rmonitoringUrl\x127\n" +

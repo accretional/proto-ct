@@ -108,8 +108,13 @@ message RawLogEntry {
   bytes extra_data = 6;  // cert chain / precert chain
 
   // static-ct-api (sunlight LogEntry).
-  bytes certificate = 7;          // leaf cert DER (x509) or TBSCertificate (precert)
-  bytes precertificate = 8;       // precert chain entry pre_certificate
+  // Field 7 (`certificate`) was removed (storage opt O2): the leaf cert DER /
+  // TBSCertificate is already embedded in `leaf_input` (the reconstructed
+  // MerkleTreeLeaf), so populating it duplicated ~1.4 KB/entry (~half the static
+  // record). Downstream tools parse the cert out of `leaf_input` instead.
+  reserved 7;
+  reserved "certificate";
+  bytes precertificate = 8;       // precert chain entry pre_certificate (not in leaf_input)
   bytes issuer_key_hash = 9;      // precert issuer key hash
   repeated bytes chain_fingerprints = 10; // SHA-256 of issuer chain certs
 }
