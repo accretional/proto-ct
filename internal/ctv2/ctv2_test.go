@@ -2,6 +2,7 @@ package ctv2
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,13 +38,29 @@ func makeX509LeafInput(t *testing.T, tsMs uint64, der []byte) []byte {
 	return b
 }
 
+// makeCertChain TLS-encodes a CertificateChain (the RFC6962 x509 extra_data
+// shape) from the given issuer cert DERs.
+func makeCertChain(t *testing.T, ders ...[]byte) []byte {
+	t.Helper()
+	chain := ct.CertificateChain{}
+	for _, d := range ders {
+		chain.Entries = append(chain.Entries, ct.ASN1Cert{Data: d})
+	}
+	b, err := tls.Marshal(chain)
+	if err != nil {
+		t.Fatalf("tls.Marshal CertificateChain: %v", err)
+	}
+	return b
+}
+
 func TestRawEntryFromRFC6962_ParsesHeader(t *testing.T) {
 	const tsMs = 1_700_000_000_000
 	der := []byte{0x30, 0x03, 0x01, 0x02, 0x03}
-	extra := []byte{0xAA, 0xBB}
+	ca := []byte{0x30, 0x04, 0x0a, 0x0b, 0x0c, 0x0d}
+	extra := makeCertChain(t, ca)
 	leafInput := makeX509LeafInput(t, tsMs, der)
 
-	r, err := rawEntryFromRFC6962(42, leafInput, extra)
+	r, chains, err := rawEntryFromRFC6962(42, leafInput, extra)
 	if err != nil {
 		t.Fatalf("rawEntryFromRFC6962: %v", err)
 	}
@@ -59,13 +76,21 @@ func TestRawEntryFromRFC6962_ParsesHeader(t *testing.T) {
 	if r.Source != pb.LogProtocol_LOG_PROTOCOL_RFC6962 {
 		t.Errorf("source = %v, want RFC6962", r.Source)
 	}
-	if string(r.LeafInput) != string(leafInput) || string(r.ExtraData) != string(extra) {
-		t.Errorf("raw bytes not stored verbatim")
+	if string(r.LeafInput) != string(leafInput) {
+		t.Errorf("leaf_input not stored verbatim")
+	}
+	// O1: the chain is not stored inline; it becomes one fingerprint + one chainCert.
+	wantFP := sha256.Sum256(ca)
+	if len(r.ChainFingerprints) != 1 || string(r.ChainFingerprints[0]) != string(wantFP[:]) {
+		t.Errorf("chain_fingerprints = %v, want one SHA-256(ca)", r.ChainFingerprints)
+	}
+	if len(chains) != 1 || chains[0].hash != wantFP || string(chains[0].der) != string(ca) {
+		t.Errorf("returned chain certs = %v, want one {hash, der} for ca", chains)
 	}
 }
 
 func TestRawEntryFromRFC6962_BadLeaf(t *testing.T) {
-	if _, err := rawEntryFromRFC6962(0, []byte{0x00}, nil); err == nil {
+	if _, _, err := rawEntryFromRFC6962(0, []byte{0x00}, nil); err == nil {
 		t.Fatal("expected error on malformed leaf_input")
 	}
 }
@@ -119,6 +144,21 @@ func (m *memWriter) Put(_ context.Context, relPath string, data []byte) error {
 	return nil
 }
 
+func (m *memWriter) PutIfAbsent(_ context.Context, relPath string, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.files == nil {
+		m.files = map[string][]byte{}
+	}
+	if _, exists := m.files[relPath]; exists {
+		return nil // content-addressed: no-op when present
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	m.files[relPath] = cp
+	return nil
+}
+
 func (m *memWriter) has(suffix string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,14 +176,14 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 	meta := &pb.LogMeta{MonitoringUrl: "https://log.example/2024h1/"}
 
 	mw := &memWriter{}
-	s := newBatchSink(mw, meta, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY)
+	s := newBatchSink(mw, meta, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, nil)
 
 	// One contiguous batch straddling midnight -> two contiguous same-day files.
-	err := s.writeBatch(context.Background(), []*pb.RawLogEntry{
+	err := s.writeBatch(context.Background(), entryBatch{entries: []*pb.RawLogEntry{
 		{Index: 10, TimestampMs: day1},
 		{Index: 11, TimestampMs: day1},
 		{Index: 12, TimestampMs: day2},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("writeBatch: %v", err)
 	}
@@ -169,13 +209,13 @@ func TestBatchSink_SplitsBatchAcrossDayBoundary(t *testing.T) {
 func TestBatchSink_DisjointBatchesSameDay(t *testing.T) {
 	ts := time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC).UnixMilli()
 	mw := &memWriter{}
-	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY)
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, nil)
 	ctx := context.Background()
 	// Two disjoint batches in the same day -> two distinct files, no overlap.
-	if err := s.writeBatch(ctx, []*pb.RawLogEntry{{Index: 0, TimestampMs: ts}, {Index: 1, TimestampMs: ts}}); err != nil {
+	if err := s.writeBatch(ctx, entryBatch{entries: []*pb.RawLogEntry{{Index: 0, TimestampMs: ts}, {Index: 1, TimestampMs: ts}}}); err != nil {
 		t.Fatalf("writeBatch 1: %v", err)
 	}
-	if err := s.writeBatch(ctx, []*pb.RawLogEntry{{Index: 2, TimestampMs: ts}, {Index: 3, TimestampMs: ts}}); err != nil {
+	if err := s.writeBatch(ctx, entryBatch{entries: []*pb.RawLogEntry{{Index: 2, TimestampMs: ts}, {Index: 3, TimestampMs: ts}}}); err != nil {
 		t.Fatalf("writeBatch 2: %v", err)
 	}
 	if len(mw.files) != 2 {
@@ -189,7 +229,7 @@ func TestBatchSink_DisjointBatchesSameDay(t *testing.T) {
 func TestBatchSink_ConcurrentBatchesSafe(t *testing.T) {
 	ts := time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC).UnixMilli()
 	mw := &memWriter{}
-	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY)
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, nil)
 	ctx := context.Background()
 
 	const n = 50
@@ -200,10 +240,10 @@ func TestBatchSink_ConcurrentBatchesSafe(t *testing.T) {
 		go func(b int) {
 			defer wg.Done()
 			idx := int64(b * 2)
-			errs[b] = s.writeBatch(ctx, []*pb.RawLogEntry{
+			errs[b] = s.writeBatch(ctx, entryBatch{entries: []*pb.RawLogEntry{
 				{Index: idx, TimestampMs: ts},
 				{Index: idx + 1, TimestampMs: ts},
-			})
+			}})
 		}(b)
 	}
 	wg.Wait()
@@ -223,11 +263,72 @@ func TestBatchSink_ConcurrentBatchesSafe(t *testing.T) {
 	}
 }
 
+func TestIssuerStore_DedupesAndWritesOnce(t *testing.T) {
+	mw := &memWriter{}
+	store := newIssuerStore(mw)
+	ctx := context.Background()
+
+	caA := []byte("CA-cert-A")
+	caB := []byte("CA-cert-B")
+	hA := sha256.Sum256(caA)
+	hB := sha256.Sum256(caB)
+
+	// Three "batches", all sharing caA; caB appears only in the second.
+	for _, certs := range [][]chainCert{
+		{{hash: hA, der: caA}},
+		{{hash: hA, der: caA}, {hash: hB, der: caB}},
+		{{hash: hA, der: caA}},
+	} {
+		if err := store.put(ctx, certs); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+
+	if len(mw.files) != 2 {
+		t.Fatalf("issuer store wrote %d files, want 2 (one per unique cert): %v", len(mw.files), keys(mw.files))
+	}
+	pathA := issuerStorePath(hA)
+	pathB := issuerStorePath(hB)
+	if string(mw.files[pathA]) != string(caA) {
+		t.Errorf("%s = %q, want %q", pathA, mw.files[pathA], caA)
+	}
+	if string(mw.files[pathB]) != string(caB) {
+		t.Errorf("%s = %q, want %q", pathB, mw.files[pathB], caB)
+	}
+}
+
+// TestBatchSink_WritesIssuerCertsThenLeaves checks the RFC6962 sink path lands
+// chain certs in the issuer store and the leaf records keep matching fingerprints.
+func TestBatchSink_WritesIssuerCerts(t *testing.T) {
+	const tsMs = 1_700_000_000_000
+	leaf := makeX509LeafInput(t, tsMs, []byte{0x30, 0x03, 0x01, 0x02, 0x03})
+	ca := []byte{0x30, 0x05, 0x09, 0x08, 0x07, 0x06, 0x05}
+	extra := makeCertChain(t, ca)
+
+	r, chains, err := rawEntryFromRFC6962(0, leaf, extra)
+	if err != nil {
+		t.Fatalf("rawEntryFromRFC6962: %v", err)
+	}
+
+	mw := &memWriter{}
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, newIssuerStore(mw))
+	if err := s.writeBatch(context.Background(), entryBatch{entries: []*pb.RawLogEntry{r}, chains: chains}); err != nil {
+		t.Fatalf("writeBatch: %v", err)
+	}
+
+	if !mw.has(issuerStorePath(sha256.Sum256(ca))) {
+		t.Errorf("issuer cert not written to store; files: %v", keys(mw.files))
+	}
+	if len(r.ChainFingerprints) != 1 {
+		t.Errorf("leaf kept %d fingerprints, want 1", len(r.ChainFingerprints))
+	}
+}
+
 func TestRawLogEntryBatch_BinaryRoundTrip(t *testing.T) {
 	batch := &pb.RawLogEntryBatch{
 		Log: &pb.LogMeta{MonitoringUrl: "https://log.example/", Protocol: pb.LogProtocol_LOG_PROTOCOL_RFC6962},
 		Entries: []*pb.RawLogEntry{
-			{Index: 1, TimestampMs: 100, EntryType: pb.EntryType_ENTRY_TYPE_X509, LeafInput: []byte{1, 2, 3}, ExtraData: []byte{4}},
+			{Index: 1, TimestampMs: 100, EntryType: pb.EntryType_ENTRY_TYPE_X509, LeafInput: []byte{1, 2, 3}, ChainFingerprints: [][]byte{{4}}},
 			{Index: 2, TimestampMs: 200, EntryType: pb.EntryType_ENTRY_TYPE_PRECERT, Precertificate: []byte{9}},
 		},
 	}

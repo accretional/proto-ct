@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -47,7 +48,8 @@ func TestLive_GetLogEntries(t *testing.T) {
 		{"static", liveStaticLogIDHex},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewService(t.TempDir())
+			root := t.TempDir()
+			svc := NewService(root)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			resp, err := svc.GetLogEntries(ctx, &pb.GetLogEntriesRequest{
@@ -63,6 +65,16 @@ func TestLive_GetLogEntries(t *testing.T) {
 			}
 			if resp.LastIndex != 4 {
 				t.Errorf("last_index = %d, want 4", resp.LastIndex)
+			}
+			// O1: the RFC6962 path must dedupe the issuer chain into the store
+			// rather than inlining it; the static path resolves chains from the
+			// log's own issuer endpoint, so it writes no store.
+			ders, _ := filepath.Glob(filepath.Join(root, issuerDir, "*.der"))
+			if tc.name == "rfc6962" && len(ders) == 0 {
+				t.Errorf("rfc6962: issuer store %s/ is empty, want >=1 deduped chain cert", issuerDir)
+			}
+			if tc.name == "static" && len(ders) != 0 {
+				t.Errorf("static: issuer store should be empty, got %d files", len(ders))
 			}
 		})
 	}

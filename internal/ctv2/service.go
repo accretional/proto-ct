@@ -245,9 +245,18 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		MonitoringUrl: sel.MonitoringUrl,
 		Protocol:      sel.Protocol,
 	}
-	sink := newBatchSink(&LocalFSWriter{Root: root}, meta, req.GetGranularity())
+	// RFC6962 carries the issuer chain inline (extra_data); we dedupe it into a
+	// shared issuer store rather than repeating it per leaf. static/tile records
+	// carry chain fingerprints only (certs live at the log's issuer endpoint), so
+	// they never feed the store — leave it nil for them.
+	w := &LocalFSWriter{Root: root}
+	var issuers *issuerStore
+	if sel.Protocol == pb.LogProtocol_LOG_PROTOCOL_RFC6962 {
+		issuers = newIssuerStore(w)
+	}
+	sink := newBatchSink(w, meta, req.GetGranularity(), issuers)
 
-	sinkFn := func(entries []*pb.RawLogEntry) error { return sink.writeBatch(ctx, entries) }
+	sinkFn := func(b entryBatch) error { return sink.writeBatch(ctx, b) }
 	if err := fetcher.Fetch(ctx, req.GetStartIndex(), req.GetEndIndex(), sinkFn); err != nil {
 		return nil, status.Errorf(codes.Internal, "fetch range: %v", err)
 	}

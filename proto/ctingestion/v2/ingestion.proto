@@ -93,30 +93,40 @@ message GetLogEntriesResponse {
 }
 
 // RawLogEntry is the unified raw record persisted to disk (as binary protobuf,
-// in RawLogEntryBatch files). For
-// RFC 6962 logs, `leaf_input`/`extra_data` hold the verbatim wire bytes. For
-// static-ct-api logs (which expose entries already split), the certificate /
-// chain fields are populated instead. `source` says which fields are authoritative.
+// in RawLogEntryBatch files). After storage opts O1+O2+O3 both protocols converge
+// on one minimal shape: `leaf_input` (the canonical TLS-encoded MerkleTreeLeaf,
+// which embeds the leaf cert / TBSCertificate) + `chain_fingerprints` (+ precert
+// fields). The issuer chain is NOT stored inline; each leaf keeps only SHA-256
+// fingerprints, and the actual chain certs live once in a shared, content-
+// addressed issuer store (`<output_root>/issuers/<hex>.der` for RFC 6962, or the
+// log's own `issuer/<hash>` endpoint for static-ct-api). `source` records which
+// protocol produced the record.
 message RawLogEntry {
   int64 index = 1;
   int64 timestamp_ms = 2;
   EntryType entry_type = 3;
   LogProtocol source = 4;
 
-  // RFC 6962 verbatim.
-  bytes leaf_input = 5;  // TLS-encoded MerkleTreeLeaf
-  bytes extra_data = 6;  // cert chain / precert chain
+  bytes leaf_input = 5;  // TLS-encoded MerkleTreeLeaf (verbatim for RFC 6962, reconstructed for static)
 
-  // static-ct-api (sunlight LogEntry).
+  // Field 6 (`extra_data`) was removed (storage opt O1): RFC 6962 carried the
+  // entire issuer chain as DER here (~3.9 KB/entry, ~79% of the record, mostly
+  // duplicate CA certs). The chain is now stored as `chain_fingerprints` + a
+  // shared issuer store, dropping RFC 6962 records from ~5 KB to ~1-1.5 KB. The
+  // full submitted precertificate (the only part of extra_data not derivable from
+  // leaf_input) is preserved in `precertificate`.
+  reserved 6;
+  reserved "extra_data";
+
   // Field 7 (`certificate`) was removed (storage opt O2): the leaf cert DER /
   // TBSCertificate is already embedded in `leaf_input` (the reconstructed
   // MerkleTreeLeaf), so populating it duplicated ~1.4 KB/entry (~half the static
   // record). Downstream tools parse the cert out of `leaf_input` instead.
   reserved 7;
   reserved "certificate";
-  bytes precertificate = 8;       // precert chain entry pre_certificate (not in leaf_input)
-  bytes issuer_key_hash = 9;      // precert issuer key hash
-  repeated bytes chain_fingerprints = 10; // SHA-256 of issuer chain certs
+  bytes precertificate = 8;       // full submitted precert (precerts only; not in leaf_input)
+  bytes issuer_key_hash = 9;      // precert issuer key hash (precerts only)
+  repeated bytes chain_fingerprints = 10; // SHA-256 of each issuer-chain cert; resolve via the issuer store
 }
 
 message LogMeta {
