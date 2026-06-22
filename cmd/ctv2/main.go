@@ -41,6 +41,7 @@ var (
 	pageSize    = flag.Int("page-size", 0, "get-entries page size hint (rfc6962)")
 	granularity = flag.String("granularity", "day", "partition granularity: day | hour")
 	noKeepAlive = flag.Bool("no-keepalive", false, "close each HTTP connection (no keep-alive); needed for DigiCert (rfc6962)")
+	compress    = flag.String("compress", "none", "compress written files: none | gzip")
 	userAgent   = flag.String("user-agent", "", "override User-Agent")
 	timeout     = flag.Duration("timeout", time.Hour, "overall RPC timeout")
 	covSTH      = flag.Bool("coverage-sth", true, "coverage mode: query the live STH for tree_size + coverage%%")
@@ -118,6 +119,18 @@ func gran() pb.PartitionGranularity {
 	return pb.PartitionGranularity_PARTITION_GRANULARITY_DAY
 }
 
+func compression() pb.Compression {
+	switch *compress {
+	case "gzip":
+		return pb.Compression_COMPRESSION_GZIP
+	case "none", "":
+		return pb.Compression_COMPRESSION_NONE
+	default:
+		log.Fatalf("-compress must be none|gzip (got %q)", *compress)
+		return pb.Compression_COMPRESSION_NONE
+	}
+}
+
 func runList(ctx context.Context, cli pb.CTIngestionServiceClient) {
 	resp, err := cli.GetLogList(ctx, &pb.GetLogListRequest{})
 	if err != nil {
@@ -162,6 +175,7 @@ func runFetch(ctx context.Context, cli pb.CTIngestionServiceClient) {
 		OutputRoot:       *out,
 		Granularity:      gran(),
 		DisableKeepAlive: *noKeepAlive,
+		Compression:      compression(),
 	})
 	if err != nil {
 		log.Fatalf("GetLogEntries: %v", err)

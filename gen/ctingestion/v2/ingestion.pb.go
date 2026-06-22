@@ -119,6 +119,58 @@ func (PartitionGranularity) EnumDescriptor() ([]byte, []int) {
 	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{1}
 }
 
+// Compression applied to the partition .binpb files (the issuer store is left
+// uncompressed — see the `compression` field). When enabled the on-disk partition
+// name gains a ".gz" suffix.
+type Compression int32
+
+const (
+	Compression_COMPRESSION_UNSPECIFIED Compression = 0 // server treats as NONE
+	Compression_COMPRESSION_NONE        Compression = 1
+	Compression_COMPRESSION_GZIP        Compression = 2
+)
+
+// Enum value maps for Compression.
+var (
+	Compression_name = map[int32]string{
+		0: "COMPRESSION_UNSPECIFIED",
+		1: "COMPRESSION_NONE",
+		2: "COMPRESSION_GZIP",
+	}
+	Compression_value = map[string]int32{
+		"COMPRESSION_UNSPECIFIED": 0,
+		"COMPRESSION_NONE":        1,
+		"COMPRESSION_GZIP":        2,
+	}
+)
+
+func (x Compression) Enum() *Compression {
+	p := new(Compression)
+	*p = x
+	return p
+}
+
+func (x Compression) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Compression) Descriptor() protoreflect.EnumDescriptor {
+	return file_ctingestion_v2_ingestion_proto_enumTypes[2].Descriptor()
+}
+
+func (Compression) Type() protoreflect.EnumType {
+	return &file_ctingestion_v2_ingestion_proto_enumTypes[2]
+}
+
+func (x Compression) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Compression.Descriptor instead.
+func (Compression) EnumDescriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{2}
+}
+
 // LogSelector identifies the target log. Either set `log_id` (resolved against
 // the server's cached log list, which supplies url/protocol/key) OR set
 // `monitoring_url` + `protocol` explicitly (+ `public_key` for static logs,
@@ -210,8 +262,15 @@ type GetLogEntriesRequest struct {
 	// re-roll requests across all servers (rfc6962 path). Costs a TLS handshake
 	// per request, so leave off for fast logs; on for DigiCert. Default: off.
 	DisableKeepAlive bool `protobuf:"varint,11,opt,name=disable_keep_alive,json=disableKeepAlive,proto3" json:"disable_keep_alive,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Compress the partition files with gzip (.binpb -> .binpb.gz). RFC6962 chains
+	// were already deduped into the issuer store (O1), so the leaf files are mostly
+	// leaf-cert DER; gzip still trims them ~2.2x. The issuer store is NOT compressed
+	// (small DER certs barely shrink, and raw files keep the content-address
+	// invariant sha256(<hex>.der) == fingerprint). Default (unspecified) = NONE.
+	// (Storage opt O4.)
+	Compression   Compression `protobuf:"varint,12,opt,name=compression,proto3,enum=ctingestion.v2.Compression" json:"compression,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetLogEntriesRequest) Reset() {
@@ -321,10 +380,17 @@ func (x *GetLogEntriesRequest) GetDisableKeepAlive() bool {
 	return false
 }
 
+func (x *GetLogEntriesRequest) GetCompression() Compression {
+	if x != nil {
+		return x.Compression
+	}
+	return Compression_COMPRESSION_UNSPECIFIED
+}
+
 type GetLogEntriesResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	EntriesWritten int64                  `protobuf:"varint,1,opt,name=entries_written,json=entriesWritten,proto3" json:"entries_written,omitempty"`
-	BytesWritten   int64                  `protobuf:"varint,2,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
+	BytesWritten   int64                  `protobuf:"varint,2,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"` // uncompressed logical size of written records; on-disk is smaller when compression is set
 	FirstIndex     int64                  `protobuf:"varint,3,opt,name=first_index,json=firstIndex,proto3" json:"first_index,omitempty"`
 	LastIndex      int64                  `protobuf:"varint,4,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
 	unknownFields  protoimpl.UnknownFields
@@ -1014,7 +1080,7 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\x0emonitoring_url\x18\x02 \x01(\tR\rmonitoringUrl\x127\n" +
 	"\bprotocol\x18\x03 \x01(\x0e2\x1b.ctingestion.v2.LogProtocolR\bprotocol\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x04 \x01(\fR\tpublicKey\"\xba\x03\n" +
+	"public_key\x18\x04 \x01(\fR\tpublicKey\"\xf9\x03\n" +
 	"\x14GetLogEntriesRequest\x12-\n" +
 	"\x03log\x18\x01 \x01(\v2\x1b.ctingestion.v2.LogSelectorR\x03log\x12\x1f\n" +
 	"\vstart_index\x18\x02 \x01(\x03R\n" +
@@ -1031,7 +1097,8 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\vgranularity\x18\t \x01(\x0e2$.ctingestion.v2.PartitionGranularityR\vgranularity\x12\x16\n" +
 	"\x06verify\x18\n" +
 	" \x01(\bR\x06verify\x12,\n" +
-	"\x12disable_keep_alive\x18\v \x01(\bR\x10disableKeepAlive\"\xb7\x01\n" +
+	"\x12disable_keep_alive\x18\v \x01(\bR\x10disableKeepAlive\x12=\n" +
+	"\vcompression\x18\f \x01(\x0e2\x1b.ctingestion.v2.CompressionR\vcompression\"\xb7\x01\n" +
 	"\x15GetLogEntriesResponse\x12'\n" +
 	"\x0fentries_written\x18\x01 \x01(\x03R\x0eentriesWritten\x12#\n" +
 	"\rbytes_written\x18\x02 \x01(\x03R\fbytesWritten\x12\x1f\n" +
@@ -1097,7 +1164,11 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\x14PartitionGranularity\x12%\n" +
 	"!PARTITION_GRANULARITY_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19PARTITION_GRANULARITY_DAY\x10\x01\x12\x1e\n" +
-	"\x1aPARTITION_GRANULARITY_HOUR\x10\x022\xe2\x02\n" +
+	"\x1aPARTITION_GRANULARITY_HOUR\x10\x02*V\n" +
+	"\vCompression\x12\x1b\n" +
+	"\x17COMPRESSION_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10COMPRESSION_NONE\x10\x01\x12\x14\n" +
+	"\x10COMPRESSION_GZIP\x10\x022\xe2\x02\n" +
 	"\x12CTIngestionService\x12\\\n" +
 	"\rGetLogEntries\x12$.ctingestion.v2.GetLogEntriesRequest\x1a%.ctingestion.v2.GetLogEntriesResponse\x12J\n" +
 	"\n" +
@@ -1117,51 +1188,53 @@ func file_ctingestion_v2_ingestion_proto_rawDescGZIP() []byte {
 	return file_ctingestion_v2_ingestion_proto_rawDescData
 }
 
-var file_ctingestion_v2_ingestion_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_ctingestion_v2_ingestion_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_ctingestion_v2_ingestion_proto_goTypes = []any{
 	(EntryType)(0),                // 0: ctingestion.v2.EntryType
 	(PartitionGranularity)(0),     // 1: ctingestion.v2.PartitionGranularity
-	(*LogSelector)(nil),           // 2: ctingestion.v2.LogSelector
-	(*GetLogEntriesRequest)(nil),  // 3: ctingestion.v2.GetLogEntriesRequest
-	(*GetLogEntriesResponse)(nil), // 4: ctingestion.v2.GetLogEntriesResponse
-	(*RawLogEntry)(nil),           // 5: ctingestion.v2.RawLogEntry
-	(*LogMeta)(nil),               // 6: ctingestion.v2.LogMeta
-	(*RawLogEntryBatch)(nil),      // 7: ctingestion.v2.RawLogEntryBatch
-	(*GetLogListRequest)(nil),     // 8: ctingestion.v2.GetLogListRequest
-	(*GetSTHRequest)(nil),         // 9: ctingestion.v2.GetSTHRequest
-	(*STHResponse)(nil),           // 10: ctingestion.v2.STHResponse
-	(*IndexRange)(nil),            // 11: ctingestion.v2.IndexRange
-	(*CheckCoverageRequest)(nil),  // 12: ctingestion.v2.CheckCoverageRequest
-	(*CheckCoverageResponse)(nil), // 13: ctingestion.v2.CheckCoverageResponse
-	(LogProtocol)(0),              // 14: ctingestion.v2.LogProtocol
-	(*CTLogList)(nil),             // 15: ctingestion.v2.CTLogList
+	(Compression)(0),              // 2: ctingestion.v2.Compression
+	(*LogSelector)(nil),           // 3: ctingestion.v2.LogSelector
+	(*GetLogEntriesRequest)(nil),  // 4: ctingestion.v2.GetLogEntriesRequest
+	(*GetLogEntriesResponse)(nil), // 5: ctingestion.v2.GetLogEntriesResponse
+	(*RawLogEntry)(nil),           // 6: ctingestion.v2.RawLogEntry
+	(*LogMeta)(nil),               // 7: ctingestion.v2.LogMeta
+	(*RawLogEntryBatch)(nil),      // 8: ctingestion.v2.RawLogEntryBatch
+	(*GetLogListRequest)(nil),     // 9: ctingestion.v2.GetLogListRequest
+	(*GetSTHRequest)(nil),         // 10: ctingestion.v2.GetSTHRequest
+	(*STHResponse)(nil),           // 11: ctingestion.v2.STHResponse
+	(*IndexRange)(nil),            // 12: ctingestion.v2.IndexRange
+	(*CheckCoverageRequest)(nil),  // 13: ctingestion.v2.CheckCoverageRequest
+	(*CheckCoverageResponse)(nil), // 14: ctingestion.v2.CheckCoverageResponse
+	(LogProtocol)(0),              // 15: ctingestion.v2.LogProtocol
+	(*CTLogList)(nil),             // 16: ctingestion.v2.CTLogList
 }
 var file_ctingestion_v2_ingestion_proto_depIdxs = []int32{
-	14, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
-	2,  // 1: ctingestion.v2.GetLogEntriesRequest.log:type_name -> ctingestion.v2.LogSelector
+	15, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
+	3,  // 1: ctingestion.v2.GetLogEntriesRequest.log:type_name -> ctingestion.v2.LogSelector
 	1,  // 2: ctingestion.v2.GetLogEntriesRequest.granularity:type_name -> ctingestion.v2.PartitionGranularity
-	0,  // 3: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
-	14, // 4: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
-	14, // 5: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
-	6,  // 6: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
-	5,  // 7: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
-	2,  // 8: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
-	2,  // 9: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
-	11, // 10: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
-	3,  // 11: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
-	8,  // 12: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
-	9,  // 13: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
-	12, // 14: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
-	4,  // 15: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
-	15, // 16: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
-	10, // 17: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
-	13, // 18: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
-	15, // [15:19] is the sub-list for method output_type
-	11, // [11:15] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	2,  // 3: ctingestion.v2.GetLogEntriesRequest.compression:type_name -> ctingestion.v2.Compression
+	0,  // 4: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
+	15, // 5: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
+	15, // 6: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
+	7,  // 7: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
+	6,  // 8: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
+	3,  // 9: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
+	3,  // 10: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
+	12, // 11: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
+	4,  // 12: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
+	9,  // 13: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
+	10, // 14: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
+	13, // 15: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
+	5,  // 16: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
+	16, // 17: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
+	11, // 18: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
+	14, // 19: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
+	16, // [16:20] is the sub-list for method output_type
+	12, // [12:16] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_ctingestion_v2_ingestion_proto_init() }
@@ -1175,7 +1248,7 @@ func file_ctingestion_v2_ingestion_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ctingestion_v2_ingestion_proto_rawDesc), len(file_ctingestion_v2_ingestion_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,

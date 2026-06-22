@@ -4,9 +4,10 @@ How the two CT log APIs map into the v2 on-disk record (`RawLogEntry` / `RawLogE
 binary `.binpb`), why their per-entry sizes differ, and where we can shrink them. Measured
 2026-06-17 on the two test mirrors (argon2027h1 = rfc6962, tuscolo2027h1 = static).
 
-> Status: **O1 + O2 + O3 implemented** — both protocols now emit one minimal record
-> (`leaf_input` + `chain_fingerprints` + precert fields), with RFC6962 chains deduped into a
-> shared issuer store. O4 (compression) and O5 (archival tile format) remain proposals.
+> Status: **O1 + O2 + O3 + O4 implemented** — both protocols emit one minimal record
+> (`leaf_input` + `chain_fingerprints` + precert fields), RFC6962 chains are deduped into a
+> shared issuer store, and partition files are optionally gzip-compressed. O5 (archival tile
+> format) remains a proposal.
 
 ## What each protocol used to store (pre-optimization baseline)
 
@@ -105,10 +106,21 @@ shape and both minimal (~1–1.6 KB/entry). Cleanest long-term; biggest aggregat
   `issuer/<hash>` endpoint, so it writes no store. Fingerprints use the same SHA-256-of-DER on
   both paths, so the fingerprint semantics are uniform.
 
-### O4 — compression (orthogonal multiplier)
-zstd/gzip the `.binpb` files (or just the chain bytes). RFC6962 chains compress extremely well
-(repeated CA certs), so even without dedup, compression could give ~2–3×. Stacks with O1/O2, but
-dedup is structurally better than compressing redundant copies.
+### O4 — compression (orthogonal multiplier) — ✅ IMPLEMENTED (gzip)
+gzip the partition `.binpb` files. Stacks on top of O1/O2/O3 (dedup already removed the bulk of
+the redundancy; compression trims what's left of the per-leaf DER).
+- **Done:** request field `compression` (enum `Compression`, default NONE); `gzipWriter`
+  (`writer.go`) decorates the `Writer`, gzip-compressing payloads and appending `.gz`. Wired in
+  `service.go` for the **partition writer only**; `CheckCoverage` parses `<range>.binpb[.gz]`.
+  CLI: `-compress gzip`.
+- **Issuer store is deliberately NOT compressed:** small DER certs barely shrink (measured ~1.0×),
+  and keeping them raw preserves the content-address invariant `sha256(<hex>.der) == fingerprint`
+  and keeps certs directly readable.
+- **Measured** (Argon [0,5000), gzip DefaultCompression): partition files **9.29 MB → 4.20 MB
+  (~2.21×)**; issuer store unchanged at ~1.85 MB raw. Verified CheckCoverage works against the
+  compressed tree and the issuer content-address invariant holds.
+- zstd would compress better/faster but needs a non-stdlib dep; gzip (stdlib) was chosen to avoid
+  it. Could revisit if the ratio matters more than the dependency.
 
 ### O5 — static: archival tile format
 Instead of re-serializing into `RawLogEntry`, store raw static-ct-api tiles (the geomys
@@ -130,4 +142,4 @@ re-readable by sunlight, potentially more compact. A different storage strategy 
 1. **O2** (drop static `certificate`) — ✅ done.
 2. Chain question — ✅ resolved: keep fingerprints + issuer store.
 3. **O1** (RFC6962 → fingerprints + issuer store), converging on **O3** — ✅ done.
-4. **O4** compression as an independent layer whenever.
+4. **O4** (gzip partition files) — ✅ done. O5 (archival tile format) still open.

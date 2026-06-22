@@ -245,16 +245,27 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		MonitoringUrl: sel.MonitoringUrl,
 		Protocol:      sel.Protocol,
 	}
-	// RFC6962 carries the issuer chain inline (extra_data); we dedupe it into a
+	base := &LocalFSWriter{Root: root}
+
+	// Compression (O4) applies only to the partition .binpb files (which gzip
+	// ~2.2x). The issuer store is left uncompressed: small DER certs barely
+	// compress (~1.0x), and keeping them raw preserves the content-address
+	// invariant sha256(<hex>.der) == fingerprint and keeps the certs directly
+	// readable.
+	var partW Writer = base
+	if req.GetCompression() == pb.Compression_COMPRESSION_GZIP {
+		partW = newGzipWriter(base)
+	}
+
+	// RFC6962 carries the issuer chain inline (extra_data); we dedupe it into the
 	// shared issuer store rather than repeating it per leaf. static/tile records
 	// carry chain fingerprints only (certs live at the log's issuer endpoint), so
 	// they never feed the store — leave it nil for them.
-	w := &LocalFSWriter{Root: root}
 	var issuers *issuerStore
 	if sel.Protocol == pb.LogProtocol_LOG_PROTOCOL_RFC6962 {
-		issuers = newIssuerStore(w)
+		issuers = newIssuerStore(base)
 	}
-	sink := newBatchSink(w, meta, req.GetGranularity(), issuers)
+	sink := newBatchSink(partW, meta, req.GetGranularity(), issuers)
 
 	sinkFn := func(b entryBatch) error { return sink.writeBatch(ctx, b) }
 	if err := fetcher.Fetch(ctx, req.GetStartIndex(), req.GetEndIndex(), sinkFn); err != nil {

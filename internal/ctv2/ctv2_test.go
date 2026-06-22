@@ -1,9 +1,12 @@
 package ctv2
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -372,6 +375,47 @@ func TestLocalFSWriter_AtomicAndImmutable(t *testing.T) {
 	}
 }
 
+func TestGzipWriter_AppendsSuffixAndCompresses(t *testing.T) {
+	mw := &memWriter{}
+	gw := newGzipWriter(mw)
+	ctx := context.Background()
+
+	// Highly compressible payload so we can assert the on-disk form is smaller.
+	payload := bytes.Repeat([]byte("CT-leaf-bytes-"), 500)
+
+	if err := gw.Put(ctx, "2024-03-15/0-9.binpb", payload); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := gw.PutIfAbsent(ctx, "issuers/abc.der", payload); err != nil {
+		t.Fatalf("PutIfAbsent: %v", err)
+	}
+
+	for _, rel := range []string{"2024-03-15/0-9.binpb.gz", "issuers/abc.der.gz"} {
+		stored, ok := mw.files[rel]
+		if !ok {
+			t.Fatalf("expected %q in store, have %v", rel, keys(mw.files))
+		}
+		if len(stored) >= len(payload) {
+			t.Errorf("%s: compressed %d bytes >= raw %d, expected smaller", rel, len(stored), len(payload))
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(stored))
+		if err != nil {
+			t.Fatalf("%s: gzip.NewReader: %v", rel, err)
+		}
+		got, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("%s: read gz: %v", rel, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("%s: round-trip mismatch", rel)
+		}
+	}
+	// The undecorated (".binpb") name must not exist — only the ".gz" form.
+	if _, ok := mw.files["2024-03-15/0-9.binpb"]; ok {
+		t.Errorf("uncompressed name should not be present alongside .gz")
+	}
+}
+
 func TestBase36RoundTrip(t *testing.T) {
 	cases := []int64{0, 1, 9, 10, 61, 62, 63, 255, 2799999000, 1<<62 - 1, 1<<63 - 1}
 	for _, n := range cases {
@@ -408,11 +452,12 @@ func TestParseRangeFromName(t *testing.T) {
 		wantOK    bool
 	}{
 		{"0-0.binpb", 0, 1, true},
-		{"a-c.binpb", 10, 13, true},   // base36 a=10, c=12 -> [10,13)
-		{"274-27t.binpb", 0, 0, true}, // just checks ok + first<=last (values below)
-		{"foo.binpb", 0, 0, false},    // no dash
-		{"0-9.textpb", 0, 0, false},   // wrong ext
-		{"c-a.binpb", 0, 0, false},    // last < first
+		{"a-c.binpb", 10, 13, true},    // base36 a=10, c=12 -> [10,13)
+		{"a-c.binpb.gz", 10, 13, true}, // gzip-compressed partition (O4)
+		{"274-27t.binpb", 0, 0, true},  // just checks ok + first<=last (values below)
+		{"foo.binpb", 0, 0, false},     // no dash
+		{"0-9.textpb", 0, 0, false},    // wrong ext
+		{"c-a.binpb", 0, 0, false},     // last < first
 	}
 	for _, c := range cases {
 		r, ok := parseRangeFromName(c.name)
