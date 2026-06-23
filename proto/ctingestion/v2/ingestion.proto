@@ -32,6 +32,16 @@ service CTIngestionService {
   // filenames encode the index ranges) — no progress DB. Optionally queries the
   // log's current STH to report coverage_pct and gaps against the live tree.
   rpc CheckCoverage(CheckCoverageRequest) returns (CheckCoverageResponse);
+
+  // ResolveIssuers populates the local content-addressed issuer store
+  // (<output_root>/issuers/<hex>.der) for a STATIC-CT-API log so it matches the
+  // RFC 6962 storage pattern. Static records keep only chain_fingerprints (the
+  // chain certs live at the log's issuer/<hash> endpoint); this scans the stored
+  // entries, fetches each referenced-but-missing chain cert, verifies its SHA-256
+  // == fingerprint, and writes it once. Idempotent and rerunnable (a no-op once
+  // every issuer is present). After it runs, chains validate fully offline for
+  // both source types.
+  rpc ResolveIssuers(ResolveIssuersRequest) returns (ResolveIssuersResponse);
 }
 
 enum EntryType {
@@ -204,4 +214,25 @@ message CheckCoverageResponse {
   // rate-limited us). The disk-derived fields are still valid; tree_size is 0 and
   // coverage_pct/tail gap are omitted.
   string sth_error = 8;
+}
+
+message ResolveIssuersRequest {
+  // The selector is only used to recover the log's monitoring URL when it is not
+  // already recorded in the stored batches (it normally is). The disk scan and
+  // store writes use output_root alone.
+  LogSelector log = 1;
+  string output_root = 2;       // the static log's output prefix to scan + populate
+  double target_qps = 3;        // throttle issuer fetches; 0 = unlimited
+  int32 fetch_concurrency = 4;  // parallel issuer fetches; 0 = default (8)
+  string user_agent = 5;
+  bool dry_run = 6;             // only report what's missing; fetch nothing
+}
+
+message ResolveIssuersResponse {
+  int64 referenced     = 1; // distinct chain fingerprints referenced by static entries
+  int64 already_present = 2; // of those, already in the local issuer store
+  int64 fetched        = 3; // newly fetched, verified, and stored (0 on dry_run)
+  int64 failed         = 4; // fetch/verify failures
+  // A bounded sample of failures ("<hex fingerprint>: <reason>") for debugging.
+  repeated string errors = 5;
 }

@@ -42,6 +42,7 @@ var (
 	granularity = flag.String("granularity", "day", "partition granularity: day | hour")
 	noKeepAlive = flag.Bool("no-keepalive", false, "close each HTTP connection (no keep-alive); needed for DigiCert (rfc6962)")
 	compress    = flag.String("compress", "none", "compress written files: none | gzip")
+	dryRun      = flag.Bool("dry-run", false, "resolve-issuers: report missing issuers without fetching")
 	userAgent   = flag.String("user-agent", "", "override User-Agent")
 	timeout     = flag.Duration("timeout", time.Hour, "overall RPC timeout")
 	covSTH      = flag.Bool("coverage-sth", true, "coverage mode: query the live STH for tree_size + coverage%%")
@@ -70,8 +71,10 @@ func main() {
 		runFetch(ctx, cli)
 	case "coverage":
 		runCoverage(ctx, cli)
+	case "resolve-issuers":
+		runResolveIssuers(ctx, cli)
 	default:
-		log.Fatalf("unknown -mode %q (want list|sth|fetch|coverage)", *mode)
+		log.Fatalf("unknown -mode %q (want list|sth|fetch|coverage|resolve-issuers)", *mode)
 	}
 }
 
@@ -228,5 +231,40 @@ func runCoverage(ctx context.Context, cli pb.CTIngestionServiceClient) {
 		}
 	} else {
 		fmt.Printf("gaps           : none\n")
+	}
+}
+
+func runResolveIssuers(ctx context.Context, cli pb.CTIngestionServiceClient) {
+	if *out == "" {
+		log.Fatalf("resolve-issuers mode needs -out (the static log's output root)")
+	}
+	// A selector is optional: it's only used as a fallback for the issuer endpoint
+	// URL when it isn't recorded in the stored batches.
+	var sel *pb.LogSelector
+	if *logIDHex != "" || *url != "" {
+		sel = selector()
+	}
+	resp, err := cli.ResolveIssuers(ctx, &pb.ResolveIssuersRequest{
+		Log:              sel,
+		OutputRoot:       *out,
+		TargetQps:        *qps,
+		FetchConcurrency: int32(*concurrency),
+		UserAgent:        *userAgent,
+		DryRun:           *dryRun,
+	})
+	if err != nil {
+		log.Fatalf("ResolveIssuers: %v", err)
+	}
+	missing := resp.GetReferenced() - resp.GetAlreadyPresent()
+	fmt.Printf("referenced issuers : %d\n", resp.GetReferenced())
+	fmt.Printf("already present    : %d\n", resp.GetAlreadyPresent())
+	if *dryRun {
+		fmt.Printf("missing            : %d (dry-run; nothing fetched)\n", missing)
+	} else {
+		fmt.Printf("fetched + stored   : %d\n", resp.GetFetched())
+		fmt.Printf("failed             : %d\n", resp.GetFailed())
+	}
+	for _, e := range resp.GetErrors() {
+		fmt.Printf("  ! %s\n", e)
 	}
 }

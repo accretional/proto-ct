@@ -1070,6 +1070,170 @@ func (x *CheckCoverageResponse) GetSthError() string {
 	return ""
 }
 
+type ResolveIssuersRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The selector is only used to recover the log's monitoring URL when it is not
+	// already recorded in the stored batches (it normally is). The disk scan and
+	// store writes use output_root alone.
+	Log              *LogSelector `protobuf:"bytes,1,opt,name=log,proto3" json:"log,omitempty"`
+	OutputRoot       string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`                    // the static log's output prefix to scan + populate
+	TargetQps        float64      `protobuf:"fixed64,3,opt,name=target_qps,json=targetQps,proto3" json:"target_qps,omitempty"`                     // throttle issuer fetches; 0 = unlimited
+	FetchConcurrency int32        `protobuf:"varint,4,opt,name=fetch_concurrency,json=fetchConcurrency,proto3" json:"fetch_concurrency,omitempty"` // parallel issuer fetches; 0 = default (8)
+	UserAgent        string       `protobuf:"bytes,5,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	DryRun           bool         `protobuf:"varint,6,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"` // only report what's missing; fetch nothing
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ResolveIssuersRequest) Reset() {
+	*x = ResolveIssuersRequest{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveIssuersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveIssuersRequest) ProtoMessage() {}
+
+func (x *ResolveIssuersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveIssuersRequest.ProtoReflect.Descriptor instead.
+func (*ResolveIssuersRequest) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ResolveIssuersRequest) GetLog() *LogSelector {
+	if x != nil {
+		return x.Log
+	}
+	return nil
+}
+
+func (x *ResolveIssuersRequest) GetOutputRoot() string {
+	if x != nil {
+		return x.OutputRoot
+	}
+	return ""
+}
+
+func (x *ResolveIssuersRequest) GetTargetQps() float64 {
+	if x != nil {
+		return x.TargetQps
+	}
+	return 0
+}
+
+func (x *ResolveIssuersRequest) GetFetchConcurrency() int32 {
+	if x != nil {
+		return x.FetchConcurrency
+	}
+	return 0
+}
+
+func (x *ResolveIssuersRequest) GetUserAgent() string {
+	if x != nil {
+		return x.UserAgent
+	}
+	return ""
+}
+
+func (x *ResolveIssuersRequest) GetDryRun() bool {
+	if x != nil {
+		return x.DryRun
+	}
+	return false
+}
+
+type ResolveIssuersResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Referenced     int64                  `protobuf:"varint,1,opt,name=referenced,proto3" json:"referenced,omitempty"`                               // distinct chain fingerprints referenced by static entries
+	AlreadyPresent int64                  `protobuf:"varint,2,opt,name=already_present,json=alreadyPresent,proto3" json:"already_present,omitempty"` // of those, already in the local issuer store
+	Fetched        int64                  `protobuf:"varint,3,opt,name=fetched,proto3" json:"fetched,omitempty"`                                     // newly fetched, verified, and stored (0 on dry_run)
+	Failed         int64                  `protobuf:"varint,4,opt,name=failed,proto3" json:"failed,omitempty"`                                       // fetch/verify failures
+	// A bounded sample of failures ("<hex fingerprint>: <reason>") for debugging.
+	Errors        []string `protobuf:"bytes,5,rep,name=errors,proto3" json:"errors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveIssuersResponse) Reset() {
+	*x = ResolveIssuersResponse{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveIssuersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveIssuersResponse) ProtoMessage() {}
+
+func (x *ResolveIssuersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveIssuersResponse.ProtoReflect.Descriptor instead.
+func (*ResolveIssuersResponse) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ResolveIssuersResponse) GetReferenced() int64 {
+	if x != nil {
+		return x.Referenced
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetAlreadyPresent() int64 {
+	if x != nil {
+		return x.AlreadyPresent
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetFetched() int64 {
+	if x != nil {
+		return x.Fetched
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetFailed() int64 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetErrors() []string {
+	if x != nil {
+		return x.Errors
+	}
+	return nil
+}
+
 var File_ctingestion_v2_ingestion_proto protoreflect.FileDescriptor
 
 const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
@@ -1156,7 +1320,25 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\fcoverage_pct\x18\x05 \x01(\x01R\vcoveragePct\x12'\n" +
 	"\x0fpartition_files\x18\x06 \x01(\x03R\x0epartitionFiles\x12.\n" +
 	"\x04gaps\x18\a \x03(\v2\x1a.ctingestion.v2.IndexRangeR\x04gaps\x12\x1b\n" +
-	"\tsth_error\x18\b \x01(\tR\bsthError*T\n" +
+	"\tsth_error\x18\b \x01(\tR\bsthError\"\xeb\x01\n" +
+	"\x15ResolveIssuersRequest\x12-\n" +
+	"\x03log\x18\x01 \x01(\v2\x1b.ctingestion.v2.LogSelectorR\x03log\x12\x1f\n" +
+	"\voutput_root\x18\x02 \x01(\tR\n" +
+	"outputRoot\x12\x1d\n" +
+	"\n" +
+	"target_qps\x18\x03 \x01(\x01R\ttargetQps\x12+\n" +
+	"\x11fetch_concurrency\x18\x04 \x01(\x05R\x10fetchConcurrency\x12\x1d\n" +
+	"\n" +
+	"user_agent\x18\x05 \x01(\tR\tuserAgent\x12\x17\n" +
+	"\adry_run\x18\x06 \x01(\bR\x06dryRun\"\xab\x01\n" +
+	"\x16ResolveIssuersResponse\x12\x1e\n" +
+	"\n" +
+	"referenced\x18\x01 \x01(\x03R\n" +
+	"referenced\x12'\n" +
+	"\x0falready_present\x18\x02 \x01(\x03R\x0ealreadyPresent\x12\x18\n" +
+	"\afetched\x18\x03 \x01(\x03R\afetched\x12\x16\n" +
+	"\x06failed\x18\x04 \x01(\x03R\x06failed\x12\x16\n" +
+	"\x06errors\x18\x05 \x03(\tR\x06errors*T\n" +
 	"\tEntryType\x12\x1a\n" +
 	"\x16ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fENTRY_TYPE_X509\x10\x01\x12\x16\n" +
@@ -1168,13 +1350,14 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\vCompression\x12\x1b\n" +
 	"\x17COMPRESSION_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10COMPRESSION_NONE\x10\x01\x12\x14\n" +
-	"\x10COMPRESSION_GZIP\x10\x022\xe2\x02\n" +
+	"\x10COMPRESSION_GZIP\x10\x022\xc3\x03\n" +
 	"\x12CTIngestionService\x12\\\n" +
 	"\rGetLogEntries\x12$.ctingestion.v2.GetLogEntriesRequest\x1a%.ctingestion.v2.GetLogEntriesResponse\x12J\n" +
 	"\n" +
 	"GetLogList\x12!.ctingestion.v2.GetLogListRequest\x1a\x19.ctingestion.v2.CTLogList\x12D\n" +
 	"\x06GetSTH\x12\x1d.ctingestion.v2.GetSTHRequest\x1a\x1b.ctingestion.v2.STHResponse\x12\\\n" +
-	"\rCheckCoverage\x12$.ctingestion.v2.CheckCoverageRequest\x1a%.ctingestion.v2.CheckCoverageResponseB4Z2github.com/accretional/proto-ct/gen/ctingestion/v2b\x06proto3"
+	"\rCheckCoverage\x12$.ctingestion.v2.CheckCoverageRequest\x1a%.ctingestion.v2.CheckCoverageResponse\x12_\n" +
+	"\x0eResolveIssuers\x12%.ctingestion.v2.ResolveIssuersRequest\x1a&.ctingestion.v2.ResolveIssuersResponseB4Z2github.com/accretional/proto-ct/gen/ctingestion/v2b\x06proto3"
 
 var (
 	file_ctingestion_v2_ingestion_proto_rawDescOnce sync.Once
@@ -1189,52 +1372,57 @@ func file_ctingestion_v2_ingestion_proto_rawDescGZIP() []byte {
 }
 
 var file_ctingestion_v2_ingestion_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_ctingestion_v2_ingestion_proto_goTypes = []any{
-	(EntryType)(0),                // 0: ctingestion.v2.EntryType
-	(PartitionGranularity)(0),     // 1: ctingestion.v2.PartitionGranularity
-	(Compression)(0),              // 2: ctingestion.v2.Compression
-	(*LogSelector)(nil),           // 3: ctingestion.v2.LogSelector
-	(*GetLogEntriesRequest)(nil),  // 4: ctingestion.v2.GetLogEntriesRequest
-	(*GetLogEntriesResponse)(nil), // 5: ctingestion.v2.GetLogEntriesResponse
-	(*RawLogEntry)(nil),           // 6: ctingestion.v2.RawLogEntry
-	(*LogMeta)(nil),               // 7: ctingestion.v2.LogMeta
-	(*RawLogEntryBatch)(nil),      // 8: ctingestion.v2.RawLogEntryBatch
-	(*GetLogListRequest)(nil),     // 9: ctingestion.v2.GetLogListRequest
-	(*GetSTHRequest)(nil),         // 10: ctingestion.v2.GetSTHRequest
-	(*STHResponse)(nil),           // 11: ctingestion.v2.STHResponse
-	(*IndexRange)(nil),            // 12: ctingestion.v2.IndexRange
-	(*CheckCoverageRequest)(nil),  // 13: ctingestion.v2.CheckCoverageRequest
-	(*CheckCoverageResponse)(nil), // 14: ctingestion.v2.CheckCoverageResponse
-	(LogProtocol)(0),              // 15: ctingestion.v2.LogProtocol
-	(*CTLogList)(nil),             // 16: ctingestion.v2.CTLogList
+	(EntryType)(0),                 // 0: ctingestion.v2.EntryType
+	(PartitionGranularity)(0),      // 1: ctingestion.v2.PartitionGranularity
+	(Compression)(0),               // 2: ctingestion.v2.Compression
+	(*LogSelector)(nil),            // 3: ctingestion.v2.LogSelector
+	(*GetLogEntriesRequest)(nil),   // 4: ctingestion.v2.GetLogEntriesRequest
+	(*GetLogEntriesResponse)(nil),  // 5: ctingestion.v2.GetLogEntriesResponse
+	(*RawLogEntry)(nil),            // 6: ctingestion.v2.RawLogEntry
+	(*LogMeta)(nil),                // 7: ctingestion.v2.LogMeta
+	(*RawLogEntryBatch)(nil),       // 8: ctingestion.v2.RawLogEntryBatch
+	(*GetLogListRequest)(nil),      // 9: ctingestion.v2.GetLogListRequest
+	(*GetSTHRequest)(nil),          // 10: ctingestion.v2.GetSTHRequest
+	(*STHResponse)(nil),            // 11: ctingestion.v2.STHResponse
+	(*IndexRange)(nil),             // 12: ctingestion.v2.IndexRange
+	(*CheckCoverageRequest)(nil),   // 13: ctingestion.v2.CheckCoverageRequest
+	(*CheckCoverageResponse)(nil),  // 14: ctingestion.v2.CheckCoverageResponse
+	(*ResolveIssuersRequest)(nil),  // 15: ctingestion.v2.ResolveIssuersRequest
+	(*ResolveIssuersResponse)(nil), // 16: ctingestion.v2.ResolveIssuersResponse
+	(LogProtocol)(0),               // 17: ctingestion.v2.LogProtocol
+	(*CTLogList)(nil),              // 18: ctingestion.v2.CTLogList
 }
 var file_ctingestion_v2_ingestion_proto_depIdxs = []int32{
-	15, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
+	17, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
 	3,  // 1: ctingestion.v2.GetLogEntriesRequest.log:type_name -> ctingestion.v2.LogSelector
 	1,  // 2: ctingestion.v2.GetLogEntriesRequest.granularity:type_name -> ctingestion.v2.PartitionGranularity
 	2,  // 3: ctingestion.v2.GetLogEntriesRequest.compression:type_name -> ctingestion.v2.Compression
 	0,  // 4: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
-	15, // 5: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
-	15, // 6: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
+	17, // 5: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
+	17, // 6: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
 	7,  // 7: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
 	6,  // 8: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
 	3,  // 9: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
 	3,  // 10: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
 	12, // 11: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
-	4,  // 12: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
-	9,  // 13: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
-	10, // 14: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
-	13, // 15: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
-	5,  // 16: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
-	16, // 17: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
-	11, // 18: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
-	14, // 19: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
-	16, // [16:20] is the sub-list for method output_type
-	12, // [12:16] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	3,  // 12: ctingestion.v2.ResolveIssuersRequest.log:type_name -> ctingestion.v2.LogSelector
+	4,  // 13: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
+	9,  // 14: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
+	10, // 15: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
+	13, // 16: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
+	15, // 17: ctingestion.v2.CTIngestionService.ResolveIssuers:input_type -> ctingestion.v2.ResolveIssuersRequest
+	5,  // 18: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
+	18, // 19: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
+	11, // 20: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
+	14, // 21: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
+	16, // 22: ctingestion.v2.CTIngestionService.ResolveIssuers:output_type -> ctingestion.v2.ResolveIssuersResponse
+	18, // [18:23] is the sub-list for method output_type
+	13, // [13:18] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_ctingestion_v2_ingestion_proto_init() }
@@ -1249,7 +1437,7 @@ func file_ctingestion_v2_ingestion_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ctingestion_v2_ingestion_proto_rawDesc), len(file_ctingestion_v2_ingestion_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -101,10 +101,15 @@ a shared fingerprint-keyed issuer store. RFC6962 and static records become byte-
 shape and both minimal (~1–1.6 KB/entry). Cleanest long-term; biggest aggregate savings.
 - **Done:** with O1+O2 in, both `rawEntryFromRFC6962` and `rawEntryFromStatic` emit the same
   fields (`leaf_input`, `chain_fingerprints`, and for precerts `precertificate` + `issuer_key_hash`).
-  The only asymmetry left is *where the chain certs live*: RFC6962 writes them to our issuer store
-  (the log offers no issuer endpoint); static resolves fingerprints from the log's own
-  `issuer/<hash>` endpoint, so it writes no store. Fingerprints use the same SHA-256-of-DER on
-  both paths, so the fingerprint semantics are uniform.
+  Fingerprints use the same SHA-256-of-DER on both paths, so the fingerprint semantics are uniform.
+- **Issuer-store unification (`ResolveIssuers`):** RFC6962 writes chain certs to the local store
+  during ingestion (the log has no issuer endpoint); static records carry only fingerprints (certs
+  live at the log's `issuer/<hash>` endpoint). The `ResolveIssuers` RPC / `-mode resolve-issuers`
+  closes that gap: it scans a static output_root, fetches each referenced-but-missing chain cert
+  from `<monitoring_url>/issuer/<hex>`, verifies `sha256(DER) == fingerprint`, and writes it into
+  the same `<output_root>/issuers/<hex>.der` store. Idempotent/rerunnable. After it runs, **both
+  source types have an identical on-disk shape and chains validate fully offline.** (Verified live
+  on LE Sycamore: 45 unique issuers fetched from 512 entries, invariant holds, rerun is a no-op.)
 
 ### O4 — compression (orthogonal multiplier) — ✅ IMPLEMENTED (gzip)
 gzip the partition `.binpb` files. Stacks on top of O1/O2/O3 (dedup already removed the bulk of

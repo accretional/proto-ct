@@ -328,3 +328,105 @@ func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageReques
 	}
 	return resp, nil
 }
+
+// ── ResolveIssuers ───────────────────────────────────────────────────────────
+
+func (s *Service) ResolveIssuers(ctx context.Context, req *pb.ResolveIssuersRequest) (*pb.ResolveIssuersResponse, error) {
+	root := req.GetOutputRoot()
+	if root == "" {
+		root = s.defaultRoot
+	}
+	if root == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required (no server default configured)")
+	}
+
+	refs, monURL, err := collectStaticIssuerRefs(root)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "scan %s: %v", root, err)
+	}
+
+	// Which referenced issuers are missing from the local store?
+	var missing [][32]byte
+	var present int64
+	for fp := range refs {
+		if issuerPresent(root, fp) {
+			present++
+			continue
+		}
+		missing = append(missing, fp)
+	}
+
+	resp := &pb.ResolveIssuersResponse{
+		Referenced:     int64(len(refs)),
+		AlreadyPresent: present,
+	}
+	if req.GetDryRun() || len(missing) == 0 {
+		return resp, nil
+	}
+
+	// Need the issuer endpoint base. Prefer the URL recorded in the stored
+	// batches; fall back to resolving the selector.
+	if monURL == "" {
+		if sel, err := s.resolveSelector(ctx, req.GetLog()); err == nil {
+			monURL = sel.MonitoringUrl
+		}
+	}
+	if monURL == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"no monitoring_url found in stored batches; provide a log selector to locate the issuer endpoint")
+	}
+
+	ua := req.GetUserAgent()
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	conc := int(req.GetFetchConcurrency())
+	if conc <= 0 {
+		conc = 8
+	}
+	hc := httpClientFor(req.GetTargetQps(), false)
+	w := &LocalFSWriter{Root: root}
+
+	const maxErrSamples = 10
+	var mu sync.Mutex
+	var fetched, failed int64
+	work := make(chan [32]byte)
+	var wg sync.WaitGroup
+	for i := 0; i < conc; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for fp := range work {
+				der, err := fetchIssuerDER(ctx, hc, monURL, ua, fp)
+				if err == nil {
+					err = w.PutIfAbsent(ctx, issuerStorePath(fp), der)
+				}
+				mu.Lock()
+				if err != nil {
+					failed++
+					if len(resp.Errors) < maxErrSamples {
+						resp.Errors = append(resp.Errors, fmt.Sprintf("%x: %v", fp, err))
+					}
+				} else {
+					fetched++
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, fp := range missing {
+		select {
+		case <-ctx.Done():
+		default:
+			work <- fp
+			continue
+		}
+		break
+	}
+	close(work)
+	wg.Wait()
+
+	resp.Fetched = fetched
+	resp.Failed = failed
+	return resp, nil
+}
