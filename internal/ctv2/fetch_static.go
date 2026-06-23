@@ -75,7 +75,7 @@ func (f *staticFetcher) sth(ctx context.Context, logID []byte) (*pb.STHResponse,
 	}, nil
 }
 
-func (f *staticFetcher) Fetch(ctx context.Context, start, end int64, sink func([]*pb.RawLogEntry) error) error {
+func (f *staticFetcher) Fetch(ctx context.Context, start, end int64, sink func(entryBatch) error) error {
 	cp, _, err := f.client.Checkpoint(ctx)
 	if err != nil {
 		return fmt.Errorf("fetch checkpoint: %w", err)
@@ -91,7 +91,7 @@ func (f *staticFetcher) Fetch(ctx context.Context, start, end int64, sink func([
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := sink(batch); err != nil {
+		if err := sink(entryBatch{entries: batch}); err != nil {
 			return err
 		}
 		batch = make([]*pb.RawLogEntry, 0, f.batchSize)

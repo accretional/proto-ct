@@ -32,6 +32,31 @@ service CTIngestionService {
   // filenames encode the index ranges) — no progress DB. Optionally queries the
   // log's current STH to report coverage_pct and gaps against the live tree.
   rpc CheckCoverage(CheckCoverageRequest) returns (CheckCoverageResponse);
+
+  // ResolveIssuers populates the local content-addressed issuer store
+  // (<output_root>/issuers/<hex>.der) for a STATIC-CT-API log so it matches the
+  // RFC 6962 storage pattern. Static records keep only chain_fingerprints (the
+  // chain certs live at the log's issuer/<hash> endpoint); this scans the stored
+  // entries, fetches each referenced-but-missing chain cert, verifies its SHA-256
+  // == fingerprint, and writes it once. Idempotent and rerunnable (a no-op once
+  // every issuer is present). After it runs, chains validate fully offline for
+  // both source types.
+  rpc ResolveIssuers(ResolveIssuersRequest) returns (ResolveIssuersResponse);
+
+  // MirrorRoots fetches the log's accepted roots (get-roots, served from the
+  // RFC6962 url / static submission_url) and stores each verbatim, content-
+  // addressed, at <output_root>/roots/<hex>.der. These are the log's declared
+  // trust anchors — the correct anchor set for "would this log accept this
+  // chain". GetLogEntries also does this automatically (best-effort, once per
+  // call); this RPC is the standalone backfill/refresh. Idempotent.
+  rpc MirrorRoots(MirrorRootsRequest) returns (MirrorRootsResponse);
+
+  // VerifyEntry reconstructs and validates a single entry's certificate chain
+  // fully offline: leaf (from the partition) + issuer chain (from the local
+  // issuer store, by fingerprint) + the mirrored roots as trust anchors. It
+  // checks the issuance signature path terminates at a log-accepted root, at the
+  // entry's SCT timestamp.
+  rpc VerifyEntry(VerifyEntryRequest) returns (VerifyEntryResponse);
 }
 
 enum EntryType {
@@ -44,6 +69,15 @@ enum PartitionGranularity {
   PARTITION_GRANULARITY_UNSPECIFIED = 0; // server treats as DAY
   PARTITION_GRANULARITY_DAY = 1;
   PARTITION_GRANULARITY_HOUR = 2;
+}
+
+// Compression applied to the partition .binpb files (the issuer store is left
+// uncompressed — see the `compression` field). When enabled the on-disk partition
+// name gains a ".gz" suffix.
+enum Compression {
+  COMPRESSION_UNSPECIFIED = 0; // server treats as NONE
+  COMPRESSION_NONE = 1;
+  COMPRESSION_GZIP = 2;
 }
 
 // LogSelector identifies the target log. Either set `log_id` (resolved against
@@ -78,11 +112,19 @@ message GetLogEntriesRequest {
   // re-roll requests across all servers (rfc6962 path). Costs a TLS handshake
   // per request, so leave off for fast logs; on for DigiCert. Default: off.
   bool disable_keep_alive = 11;
+
+  // Compress the partition files with gzip (.binpb -> .binpb.gz). RFC6962 chains
+  // were already deduped into the issuer store (O1), so the leaf files are mostly
+  // leaf-cert DER; gzip still trims them ~2.2x. The issuer store is NOT compressed
+  // (small DER certs barely shrink, and raw files keep the content-address
+  // invariant sha256(<hex>.der) == fingerprint). Default (unspecified) = NONE.
+  // (Storage opt O4.)
+  Compression compression = 12;
 }
 
 message GetLogEntriesResponse {
   int64 entries_written = 1;
-  int64 bytes_written = 2;
+  int64 bytes_written = 2;  // uncompressed logical size of written records; on-disk is smaller when compression is set
   int64 first_index = 3;
   int64 last_index = 4;
   // A per-partition manifest was intentionally removed: large ranges produce
@@ -93,25 +135,40 @@ message GetLogEntriesResponse {
 }
 
 // RawLogEntry is the unified raw record persisted to disk (as binary protobuf,
-// in RawLogEntryBatch files). For
-// RFC 6962 logs, `leaf_input`/`extra_data` hold the verbatim wire bytes. For
-// static-ct-api logs (which expose entries already split), the certificate /
-// chain fields are populated instead. `source` says which fields are authoritative.
+// in RawLogEntryBatch files). After storage opts O1+O2+O3 both protocols converge
+// on one minimal shape: `leaf_input` (the canonical TLS-encoded MerkleTreeLeaf,
+// which embeds the leaf cert / TBSCertificate) + `chain_fingerprints` (+ precert
+// fields). The issuer chain is NOT stored inline; each leaf keeps only SHA-256
+// fingerprints, and the actual chain certs live once in a shared, content-
+// addressed issuer store (`<output_root>/issuers/<hex>.der` for RFC 6962, or the
+// log's own `issuer/<hash>` endpoint for static-ct-api). `source` records which
+// protocol produced the record.
 message RawLogEntry {
   int64 index = 1;
   int64 timestamp_ms = 2;
   EntryType entry_type = 3;
   LogProtocol source = 4;
 
-  // RFC 6962 verbatim.
-  bytes leaf_input = 5;  // TLS-encoded MerkleTreeLeaf
-  bytes extra_data = 6;  // cert chain / precert chain
+  bytes leaf_input = 5;  // TLS-encoded MerkleTreeLeaf (verbatim for RFC 6962, reconstructed for static)
 
-  // static-ct-api (sunlight LogEntry).
-  bytes certificate = 7;          // leaf cert DER (x509) or TBSCertificate (precert)
-  bytes precertificate = 8;       // precert chain entry pre_certificate
-  bytes issuer_key_hash = 9;      // precert issuer key hash
-  repeated bytes chain_fingerprints = 10; // SHA-256 of issuer chain certs
+  // Field 6 (`extra_data`) was removed (storage opt O1): RFC 6962 carried the
+  // entire issuer chain as DER here (~3.9 KB/entry, ~79% of the record, mostly
+  // duplicate CA certs). The chain is now stored as `chain_fingerprints` + a
+  // shared issuer store, dropping RFC 6962 records from ~5 KB to ~1-1.5 KB. The
+  // full submitted precertificate (the only part of extra_data not derivable from
+  // leaf_input) is preserved in `precertificate`.
+  reserved 6;
+  reserved "extra_data";
+
+  // Field 7 (`certificate`) was removed (storage opt O2): the leaf cert DER /
+  // TBSCertificate is already embedded in `leaf_input` (the reconstructed
+  // MerkleTreeLeaf), so populating it duplicated ~1.4 KB/entry (~half the static
+  // record). Downstream tools parse the cert out of `leaf_input` instead.
+  reserved 7;
+  reserved "certificate";
+  bytes precertificate = 8;       // full submitted precert (precerts only; not in leaf_input)
+  bytes issuer_key_hash = 9;      // precert issuer key hash (precerts only)
+  repeated bytes chain_fingerprints = 10; // SHA-256 of each issuer-chain cert; resolve via the issuer store
 }
 
 message LogMeta {
@@ -172,4 +229,56 @@ message CheckCoverageResponse {
   // rate-limited us). The disk-derived fields are still valid; tree_size is 0 and
   // coverage_pct/tail gap are omitted.
   string sth_error = 8;
+}
+
+message ResolveIssuersRequest {
+  // The selector is only used to recover the log's monitoring URL when it is not
+  // already recorded in the stored batches (it normally is). The disk scan and
+  // store writes use output_root alone.
+  LogSelector log = 1;
+  string output_root = 2;       // the static log's output prefix to scan + populate
+  double target_qps = 3;        // throttle issuer fetches; 0 = unlimited
+  int32 fetch_concurrency = 4;  // parallel issuer fetches; 0 = default (8)
+  string user_agent = 5;
+  bool dry_run = 6;             // only report what's missing; fetch nothing
+}
+
+message ResolveIssuersResponse {
+  int64 referenced     = 1; // distinct chain fingerprints referenced by static entries
+  int64 already_present = 2; // of those, already in the local issuer store
+  int64 fetched        = 3; // newly fetched, verified, and stored (0 on dry_run)
+  int64 failed         = 4; // fetch/verify failures
+  // A bounded sample of failures ("<hex fingerprint>: <reason>") for debugging.
+  repeated string errors = 5;
+}
+
+message MirrorRootsRequest {
+  // Selector locates the get-roots endpoint: the RFC6962 `url` for RFC6962 logs,
+  // the static `submission_url` for static logs (resolved via the log list when
+  // log_id is given). output_root is where roots/<hex>.der are written.
+  LogSelector log = 1;
+  string output_root = 2;
+  double target_qps = 3;
+  string user_agent = 4;
+}
+
+message MirrorRootsResponse {
+  int64 total          = 1; // roots returned by the log
+  int64 already_present = 2; // already in the local roots store
+  int64 stored         = 3; // newly written
+  string error         = 4; // set if get-roots failed (the call still returns)
+}
+
+message VerifyEntryRequest {
+  string output_root = 1; // the log's output prefix (holds partitions, issuers/, roots/)
+  int64 index = 2;        // entry to verify
+}
+
+message VerifyEntryResponse {
+  bool valid              = 1; // signature path from leaf terminates at a mirrored root
+  string leaf_subject     = 2;
+  repeated string chain_subjects = 3; // issuer chain (leaf's issuer first), by subject
+  string anchor_subject   = 4; // the log-accepted root the chain terminates at
+  bool within_validity    = 5; // every cert was time-valid at the entry's SCT timestamp
+  string reason           = 6; // why valid is false (empty when valid)
 }

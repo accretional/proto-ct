@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -160,6 +161,28 @@ func (s *Service) resolveSelector(ctx context.Context, sel *pb.LogSelector) (*pb
 	return out, nil
 }
 
+// getRootsBase returns the base URL that serves the RFC6962 get-roots endpoint:
+// a static log's submission_url, else the RFC6962 url. Resolved via the log list
+// when log_id is known, falling back to an explicit RFC6962 monitoring_url.
+// Returns "" when it can't be determined (e.g. a static log given by URL only).
+func (s *Service) getRootsBase(ctx context.Context, sel *pb.LogSelector) string {
+	if len(sel.GetLogId()) > 0 {
+		if lg, err := s.lookupLog(ctx, sel.GetLogId()); err == nil {
+			if lg.GetProtocol() == pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API {
+				if u := lg.GetSubmissionUrl(); u != "" {
+					return u
+				}
+			} else if u := lg.GetUrl(); u != "" {
+				return u
+			}
+		}
+	}
+	if sel.GetProtocol() == pb.LogProtocol_LOG_PROTOCOL_RFC6962 {
+		return sel.GetMonitoringUrl() // for RFC6962 the monitoring base is the API base
+	}
+	return ""
+}
+
 // ── GetSTH ───────────────────────────────────────────────────────────────────
 
 func (s *Service) GetSTH(ctx context.Context, req *pb.GetSTHRequest) (*pb.STHResponse, error) {
@@ -245,11 +268,62 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		MonitoringUrl: sel.MonitoringUrl,
 		Protocol:      sel.Protocol,
 	}
-	sink := newBatchSink(&LocalFSWriter{Root: root}, meta, req.GetGranularity())
+	base := &LocalFSWriter{Root: root}
 
-	sinkFn := func(entries []*pb.RawLogEntry) error { return sink.writeBatch(ctx, entries) }
+	// Compression (O4) applies only to the partition .binpb files (which gzip
+	// ~2.2x). The issuer store is left uncompressed: small DER certs barely
+	// compress (~1.0x), and keeping them raw preserves the content-address
+	// invariant sha256(<hex>.der) == fingerprint and keeps the certs directly
+	// readable.
+	var partW Writer = base
+	if req.GetCompression() == pb.Compression_COMPRESSION_GZIP {
+		partW = newGzipWriter(base)
+	}
+
+	// Every protocol populates the same content-addressed issuer store so both
+	// source types end up with identical on-disk shape. RFC6962 carries the chain
+	// inline (extra_data) → write it directly. static/tile carry only chain
+	// fingerprints (certs live at the log's issuer/<hash> endpoint) → resolve them
+	// inline, best-effort: failures never fail the ingest, and certs already on
+	// disk are skipped, so this is a cheap no-op on re-runs.
+	var issuers *issuerStore
+	switch sel.Protocol {
+	case pb.LogProtocol_LOG_PROTOCOL_RFC6962:
+		issuers = newIssuerStore(base, nil)
+	case pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API, pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT:
+		ihc := httpClientFor(req.GetTargetQps(), false)
+		prefix := sel.MonitoringUrl
+		issuers = newIssuerStore(base, func(ctx context.Context, fp [32]byte) ([]byte, error) {
+			return fetchIssuerDER(ctx, ihc, prefix, ua, fp)
+		})
+	}
+	sink := newBatchSink(partW, meta, req.GetGranularity(), issuers)
+
+	sinkFn := func(b entryBatch) error { return sink.writeBatch(ctx, b) }
 	if err := fetcher.Fetch(ctx, req.GetStartIndex(), req.GetEndIndex(), sinkFn); err != nil {
 		return nil, status.Errorf(codes.Internal, "fetch range: %v", err)
+	}
+	if issuers != nil {
+		if f, fail, errs := issuers.resolveStats(); f > 0 || fail > 0 {
+			msg := fmt.Sprintf("issuer resolution: %d fetched, %d failed", f, fail)
+			if len(errs) > 0 {
+				msg += " (e.g. " + errs[0] + ")"
+			}
+			log.Print(msg)
+		}
+	}
+
+	// Mirror the log's accepted roots once (best-effort): they're the trust anchors
+	// for offline chain validation. Skip if already mirrored to avoid re-downloading
+	// the full root set on every range job; MirrorRoots refreshes on demand.
+	if !rootsAlreadyMirrored(root) {
+		if rootsBase := s.getRootsBase(ctx, sel); rootsBase != "" {
+			if total, _, stored, rerr := mirrorRoots(ctx, base, s.httpClient, rootsBase, ua); rerr != nil {
+				log.Printf("mirror roots: %v", rerr)
+			} else if stored > 0 {
+				log.Printf("mirrored %d accepted roots (%d total)", stored, total)
+			}
+		}
 	}
 
 	return &pb.GetLogEntriesResponse{
@@ -305,6 +379,164 @@ func (s *Service) CheckCoverage(ctx context.Context, req *pb.CheckCoverageReques
 		for _, g := range gaps {
 			resp.Gaps = append(resp.Gaps, &pb.IndexRange{Start: g.start, End: g.end})
 		}
+	}
+	return resp, nil
+}
+
+// ── ResolveIssuers ───────────────────────────────────────────────────────────
+
+func (s *Service) ResolveIssuers(ctx context.Context, req *pb.ResolveIssuersRequest) (*pb.ResolveIssuersResponse, error) {
+	root := req.GetOutputRoot()
+	if root == "" {
+		root = s.defaultRoot
+	}
+	if root == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required (no server default configured)")
+	}
+
+	refs, monURL, err := collectStaticIssuerRefs(root)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "scan %s: %v", root, err)
+	}
+
+	// Which referenced issuers are missing from the local store?
+	var missing [][32]byte
+	var present int64
+	for fp := range refs {
+		if issuerPresent(root, fp) {
+			present++
+			continue
+		}
+		missing = append(missing, fp)
+	}
+
+	resp := &pb.ResolveIssuersResponse{
+		Referenced:     int64(len(refs)),
+		AlreadyPresent: present,
+	}
+	if req.GetDryRun() || len(missing) == 0 {
+		return resp, nil
+	}
+
+	// Need the issuer endpoint base. Prefer the URL recorded in the stored
+	// batches; fall back to resolving the selector.
+	if monURL == "" {
+		if sel, err := s.resolveSelector(ctx, req.GetLog()); err == nil {
+			monURL = sel.MonitoringUrl
+		}
+	}
+	if monURL == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"no monitoring_url found in stored batches; provide a log selector to locate the issuer endpoint")
+	}
+
+	ua := req.GetUserAgent()
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	conc := int(req.GetFetchConcurrency())
+	if conc <= 0 {
+		conc = 8
+	}
+	hc := httpClientFor(req.GetTargetQps(), false)
+	w := &LocalFSWriter{Root: root}
+
+	const maxErrSamples = 10
+	var mu sync.Mutex
+	var fetched, failed int64
+	work := make(chan [32]byte)
+	var wg sync.WaitGroup
+	for i := 0; i < conc; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for fp := range work {
+				der, err := fetchIssuerDER(ctx, hc, monURL, ua, fp)
+				if err == nil {
+					err = w.PutIfAbsent(ctx, issuerStorePath(fp), der)
+				}
+				mu.Lock()
+				if err != nil {
+					failed++
+					if len(resp.Errors) < maxErrSamples {
+						resp.Errors = append(resp.Errors, fmt.Sprintf("%x: %v", fp, err))
+					}
+				} else {
+					fetched++
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, fp := range missing {
+		select {
+		case <-ctx.Done():
+		default:
+			work <- fp
+			continue
+		}
+		break
+	}
+	close(work)
+	wg.Wait()
+
+	resp.Fetched = fetched
+	resp.Failed = failed
+	return resp, nil
+}
+
+// ── MirrorRoots ──────────────────────────────────────────────────────────────
+
+func (s *Service) MirrorRoots(ctx context.Context, req *pb.MirrorRootsRequest) (*pb.MirrorRootsResponse, error) {
+	root := req.GetOutputRoot()
+	if root == "" {
+		root = s.defaultRoot
+	}
+	if root == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required (no server default configured)")
+	}
+	sel, err := s.resolveSelector(ctx, req.GetLog())
+	if err != nil {
+		return nil, err
+	}
+	base := s.getRootsBase(ctx, sel)
+	if base == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"cannot determine get-roots endpoint; provide a log_id (or an RFC6962 url)")
+	}
+	ua := req.GetUserAgent()
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	hc := httpClientFor(req.GetTargetQps(), false)
+	resp := &pb.MirrorRootsResponse{}
+	total, present, stored, err := mirrorRoots(ctx, &LocalFSWriter{Root: root}, hc, base, ua)
+	resp.Total = int64(total)
+	resp.AlreadyPresent = int64(present)
+	resp.Stored = int64(stored)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return resp, nil
+}
+
+// ── VerifyEntry ──────────────────────────────────────────────────────────────
+
+func (s *Service) VerifyEntry(ctx context.Context, req *pb.VerifyEntryRequest) (*pb.VerifyEntryResponse, error) {
+	root := req.GetOutputRoot()
+	if root == "" {
+		root = s.defaultRoot
+	}
+	if root == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required (no server default configured)")
+	}
+	e, err := findEntry(root, req.GetIndex())
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	}
+	resp, err := verifyEntryChain(root, e)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "verify: %v", err)
 	}
 	return resp, nil
 }

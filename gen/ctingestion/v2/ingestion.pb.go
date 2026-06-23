@@ -119,6 +119,58 @@ func (PartitionGranularity) EnumDescriptor() ([]byte, []int) {
 	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{1}
 }
 
+// Compression applied to the partition .binpb files (the issuer store is left
+// uncompressed — see the `compression` field). When enabled the on-disk partition
+// name gains a ".gz" suffix.
+type Compression int32
+
+const (
+	Compression_COMPRESSION_UNSPECIFIED Compression = 0 // server treats as NONE
+	Compression_COMPRESSION_NONE        Compression = 1
+	Compression_COMPRESSION_GZIP        Compression = 2
+)
+
+// Enum value maps for Compression.
+var (
+	Compression_name = map[int32]string{
+		0: "COMPRESSION_UNSPECIFIED",
+		1: "COMPRESSION_NONE",
+		2: "COMPRESSION_GZIP",
+	}
+	Compression_value = map[string]int32{
+		"COMPRESSION_UNSPECIFIED": 0,
+		"COMPRESSION_NONE":        1,
+		"COMPRESSION_GZIP":        2,
+	}
+)
+
+func (x Compression) Enum() *Compression {
+	p := new(Compression)
+	*p = x
+	return p
+}
+
+func (x Compression) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Compression) Descriptor() protoreflect.EnumDescriptor {
+	return file_ctingestion_v2_ingestion_proto_enumTypes[2].Descriptor()
+}
+
+func (Compression) Type() protoreflect.EnumType {
+	return &file_ctingestion_v2_ingestion_proto_enumTypes[2]
+}
+
+func (x Compression) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Compression.Descriptor instead.
+func (Compression) EnumDescriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{2}
+}
+
 // LogSelector identifies the target log. Either set `log_id` (resolved against
 // the server's cached log list, which supplies url/protocol/key) OR set
 // `monitoring_url` + `protocol` explicitly (+ `public_key` for static logs,
@@ -210,8 +262,15 @@ type GetLogEntriesRequest struct {
 	// re-roll requests across all servers (rfc6962 path). Costs a TLS handshake
 	// per request, so leave off for fast logs; on for DigiCert. Default: off.
 	DisableKeepAlive bool `protobuf:"varint,11,opt,name=disable_keep_alive,json=disableKeepAlive,proto3" json:"disable_keep_alive,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Compress the partition files with gzip (.binpb -> .binpb.gz). RFC6962 chains
+	// were already deduped into the issuer store (O1), so the leaf files are mostly
+	// leaf-cert DER; gzip still trims them ~2.2x. The issuer store is NOT compressed
+	// (small DER certs barely shrink, and raw files keep the content-address
+	// invariant sha256(<hex>.der) == fingerprint). Default (unspecified) = NONE.
+	// (Storage opt O4.)
+	Compression   Compression `protobuf:"varint,12,opt,name=compression,proto3,enum=ctingestion.v2.Compression" json:"compression,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetLogEntriesRequest) Reset() {
@@ -321,10 +380,17 @@ func (x *GetLogEntriesRequest) GetDisableKeepAlive() bool {
 	return false
 }
 
+func (x *GetLogEntriesRequest) GetCompression() Compression {
+	if x != nil {
+		return x.Compression
+	}
+	return Compression_COMPRESSION_UNSPECIFIED
+}
+
 type GetLogEntriesResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	EntriesWritten int64                  `protobuf:"varint,1,opt,name=entries_written,json=entriesWritten,proto3" json:"entries_written,omitempty"`
-	BytesWritten   int64                  `protobuf:"varint,2,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
+	BytesWritten   int64                  `protobuf:"varint,2,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"` // uncompressed logical size of written records; on-disk is smaller when compression is set
 	FirstIndex     int64                  `protobuf:"varint,3,opt,name=first_index,json=firstIndex,proto3" json:"first_index,omitempty"`
 	LastIndex      int64                  `protobuf:"varint,4,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
 	unknownFields  protoimpl.UnknownFields
@@ -390,24 +456,24 @@ func (x *GetLogEntriesResponse) GetLastIndex() int64 {
 }
 
 // RawLogEntry is the unified raw record persisted to disk (as binary protobuf,
-// in RawLogEntryBatch files). For
-// RFC 6962 logs, `leaf_input`/`extra_data` hold the verbatim wire bytes. For
-// static-ct-api logs (which expose entries already split), the certificate /
-// chain fields are populated instead. `source` says which fields are authoritative.
+// in RawLogEntryBatch files). After storage opts O1+O2+O3 both protocols converge
+// on one minimal shape: `leaf_input` (the canonical TLS-encoded MerkleTreeLeaf,
+// which embeds the leaf cert / TBSCertificate) + `chain_fingerprints` (+ precert
+// fields). The issuer chain is NOT stored inline; each leaf keeps only SHA-256
+// fingerprints, and the actual chain certs live once in a shared, content-
+// addressed issuer store (`<output_root>/issuers/<hex>.der` for RFC 6962, or the
+// log's own `issuer/<hash>` endpoint for static-ct-api). `source` records which
+// protocol produced the record.
 type RawLogEntry struct {
-	state       protoimpl.MessageState `protogen:"open.v1"`
-	Index       int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
-	TimestampMs int64                  `protobuf:"varint,2,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
-	EntryType   EntryType              `protobuf:"varint,3,opt,name=entry_type,json=entryType,proto3,enum=ctingestion.v2.EntryType" json:"entry_type,omitempty"`
-	Source      LogProtocol            `protobuf:"varint,4,opt,name=source,proto3,enum=ctingestion.v2.LogProtocol" json:"source,omitempty"`
-	// RFC 6962 verbatim.
-	LeafInput []byte `protobuf:"bytes,5,opt,name=leaf_input,json=leafInput,proto3" json:"leaf_input,omitempty"` // TLS-encoded MerkleTreeLeaf
-	ExtraData []byte `protobuf:"bytes,6,opt,name=extra_data,json=extraData,proto3" json:"extra_data,omitempty"` // cert chain / precert chain
-	// static-ct-api (sunlight LogEntry).
-	Certificate       []byte   `protobuf:"bytes,7,opt,name=certificate,proto3" json:"certificate,omitempty"`                                       // leaf cert DER (x509) or TBSCertificate (precert)
-	Precertificate    []byte   `protobuf:"bytes,8,opt,name=precertificate,proto3" json:"precertificate,omitempty"`                                 // precert chain entry pre_certificate
-	IssuerKeyHash     []byte   `protobuf:"bytes,9,opt,name=issuer_key_hash,json=issuerKeyHash,proto3" json:"issuer_key_hash,omitempty"`            // precert issuer key hash
-	ChainFingerprints [][]byte `protobuf:"bytes,10,rep,name=chain_fingerprints,json=chainFingerprints,proto3" json:"chain_fingerprints,omitempty"` // SHA-256 of issuer chain certs
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Index             int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	TimestampMs       int64                  `protobuf:"varint,2,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	EntryType         EntryType              `protobuf:"varint,3,opt,name=entry_type,json=entryType,proto3,enum=ctingestion.v2.EntryType" json:"entry_type,omitempty"`
+	Source            LogProtocol            `protobuf:"varint,4,opt,name=source,proto3,enum=ctingestion.v2.LogProtocol" json:"source,omitempty"`
+	LeafInput         []byte                 `protobuf:"bytes,5,opt,name=leaf_input,json=leafInput,proto3" json:"leaf_input,omitempty"`                          // TLS-encoded MerkleTreeLeaf (verbatim for RFC 6962, reconstructed for static)
+	Precertificate    []byte                 `protobuf:"bytes,8,opt,name=precertificate,proto3" json:"precertificate,omitempty"`                                 // full submitted precert (precerts only; not in leaf_input)
+	IssuerKeyHash     []byte                 `protobuf:"bytes,9,opt,name=issuer_key_hash,json=issuerKeyHash,proto3" json:"issuer_key_hash,omitempty"`            // precert issuer key hash (precerts only)
+	ChainFingerprints [][]byte               `protobuf:"bytes,10,rep,name=chain_fingerprints,json=chainFingerprints,proto3" json:"chain_fingerprints,omitempty"` // SHA-256 of each issuer-chain cert; resolve via the issuer store
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -473,20 +539,6 @@ func (x *RawLogEntry) GetSource() LogProtocol {
 func (x *RawLogEntry) GetLeafInput() []byte {
 	if x != nil {
 		return x.LeafInput
-	}
-	return nil
-}
-
-func (x *RawLogEntry) GetExtraData() []byte {
-	if x != nil {
-		return x.ExtraData
-	}
-	return nil
-}
-
-func (x *RawLogEntry) GetCertificate() []byte {
-	if x != nil {
-		return x.Certificate
 	}
 	return nil
 }
@@ -1018,6 +1070,445 @@ func (x *CheckCoverageResponse) GetSthError() string {
 	return ""
 }
 
+type ResolveIssuersRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The selector is only used to recover the log's monitoring URL when it is not
+	// already recorded in the stored batches (it normally is). The disk scan and
+	// store writes use output_root alone.
+	Log              *LogSelector `protobuf:"bytes,1,opt,name=log,proto3" json:"log,omitempty"`
+	OutputRoot       string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`                    // the static log's output prefix to scan + populate
+	TargetQps        float64      `protobuf:"fixed64,3,opt,name=target_qps,json=targetQps,proto3" json:"target_qps,omitempty"`                     // throttle issuer fetches; 0 = unlimited
+	FetchConcurrency int32        `protobuf:"varint,4,opt,name=fetch_concurrency,json=fetchConcurrency,proto3" json:"fetch_concurrency,omitempty"` // parallel issuer fetches; 0 = default (8)
+	UserAgent        string       `protobuf:"bytes,5,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	DryRun           bool         `protobuf:"varint,6,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"` // only report what's missing; fetch nothing
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ResolveIssuersRequest) Reset() {
+	*x = ResolveIssuersRequest{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveIssuersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveIssuersRequest) ProtoMessage() {}
+
+func (x *ResolveIssuersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveIssuersRequest.ProtoReflect.Descriptor instead.
+func (*ResolveIssuersRequest) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ResolveIssuersRequest) GetLog() *LogSelector {
+	if x != nil {
+		return x.Log
+	}
+	return nil
+}
+
+func (x *ResolveIssuersRequest) GetOutputRoot() string {
+	if x != nil {
+		return x.OutputRoot
+	}
+	return ""
+}
+
+func (x *ResolveIssuersRequest) GetTargetQps() float64 {
+	if x != nil {
+		return x.TargetQps
+	}
+	return 0
+}
+
+func (x *ResolveIssuersRequest) GetFetchConcurrency() int32 {
+	if x != nil {
+		return x.FetchConcurrency
+	}
+	return 0
+}
+
+func (x *ResolveIssuersRequest) GetUserAgent() string {
+	if x != nil {
+		return x.UserAgent
+	}
+	return ""
+}
+
+func (x *ResolveIssuersRequest) GetDryRun() bool {
+	if x != nil {
+		return x.DryRun
+	}
+	return false
+}
+
+type ResolveIssuersResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Referenced     int64                  `protobuf:"varint,1,opt,name=referenced,proto3" json:"referenced,omitempty"`                               // distinct chain fingerprints referenced by static entries
+	AlreadyPresent int64                  `protobuf:"varint,2,opt,name=already_present,json=alreadyPresent,proto3" json:"already_present,omitempty"` // of those, already in the local issuer store
+	Fetched        int64                  `protobuf:"varint,3,opt,name=fetched,proto3" json:"fetched,omitempty"`                                     // newly fetched, verified, and stored (0 on dry_run)
+	Failed         int64                  `protobuf:"varint,4,opt,name=failed,proto3" json:"failed,omitempty"`                                       // fetch/verify failures
+	// A bounded sample of failures ("<hex fingerprint>: <reason>") for debugging.
+	Errors        []string `protobuf:"bytes,5,rep,name=errors,proto3" json:"errors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveIssuersResponse) Reset() {
+	*x = ResolveIssuersResponse{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveIssuersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveIssuersResponse) ProtoMessage() {}
+
+func (x *ResolveIssuersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveIssuersResponse.ProtoReflect.Descriptor instead.
+func (*ResolveIssuersResponse) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ResolveIssuersResponse) GetReferenced() int64 {
+	if x != nil {
+		return x.Referenced
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetAlreadyPresent() int64 {
+	if x != nil {
+		return x.AlreadyPresent
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetFetched() int64 {
+	if x != nil {
+		return x.Fetched
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetFailed() int64 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *ResolveIssuersResponse) GetErrors() []string {
+	if x != nil {
+		return x.Errors
+	}
+	return nil
+}
+
+type MirrorRootsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Selector locates the get-roots endpoint: the RFC6962 `url` for RFC6962 logs,
+	// the static `submission_url` for static logs (resolved via the log list when
+	// log_id is given). output_root is where roots/<hex>.der are written.
+	Log           *LogSelector `protobuf:"bytes,1,opt,name=log,proto3" json:"log,omitempty"`
+	OutputRoot    string       `protobuf:"bytes,2,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"`
+	TargetQps     float64      `protobuf:"fixed64,3,opt,name=target_qps,json=targetQps,proto3" json:"target_qps,omitempty"`
+	UserAgent     string       `protobuf:"bytes,4,opt,name=user_agent,json=userAgent,proto3" json:"user_agent,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MirrorRootsRequest) Reset() {
+	*x = MirrorRootsRequest{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MirrorRootsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MirrorRootsRequest) ProtoMessage() {}
+
+func (x *MirrorRootsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MirrorRootsRequest.ProtoReflect.Descriptor instead.
+func (*MirrorRootsRequest) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *MirrorRootsRequest) GetLog() *LogSelector {
+	if x != nil {
+		return x.Log
+	}
+	return nil
+}
+
+func (x *MirrorRootsRequest) GetOutputRoot() string {
+	if x != nil {
+		return x.OutputRoot
+	}
+	return ""
+}
+
+func (x *MirrorRootsRequest) GetTargetQps() float64 {
+	if x != nil {
+		return x.TargetQps
+	}
+	return 0
+}
+
+func (x *MirrorRootsRequest) GetUserAgent() string {
+	if x != nil {
+		return x.UserAgent
+	}
+	return ""
+}
+
+type MirrorRootsResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Total          int64                  `protobuf:"varint,1,opt,name=total,proto3" json:"total,omitempty"`                                         // roots returned by the log
+	AlreadyPresent int64                  `protobuf:"varint,2,opt,name=already_present,json=alreadyPresent,proto3" json:"already_present,omitempty"` // already in the local roots store
+	Stored         int64                  `protobuf:"varint,3,opt,name=stored,proto3" json:"stored,omitempty"`                                       // newly written
+	Error          string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`                                          // set if get-roots failed (the call still returns)
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *MirrorRootsResponse) Reset() {
+	*x = MirrorRootsResponse{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MirrorRootsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MirrorRootsResponse) ProtoMessage() {}
+
+func (x *MirrorRootsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MirrorRootsResponse.ProtoReflect.Descriptor instead.
+func (*MirrorRootsResponse) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *MirrorRootsResponse) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *MirrorRootsResponse) GetAlreadyPresent() int64 {
+	if x != nil {
+		return x.AlreadyPresent
+	}
+	return 0
+}
+
+func (x *MirrorRootsResponse) GetStored() int64 {
+	if x != nil {
+		return x.Stored
+	}
+	return 0
+}
+
+func (x *MirrorRootsResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type VerifyEntryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OutputRoot    string                 `protobuf:"bytes,1,opt,name=output_root,json=outputRoot,proto3" json:"output_root,omitempty"` // the log's output prefix (holds partitions, issuers/, roots/)
+	Index         int64                  `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`                            // entry to verify
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyEntryRequest) Reset() {
+	*x = VerifyEntryRequest{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyEntryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyEntryRequest) ProtoMessage() {}
+
+func (x *VerifyEntryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyEntryRequest.ProtoReflect.Descriptor instead.
+func (*VerifyEntryRequest) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *VerifyEntryRequest) GetOutputRoot() string {
+	if x != nil {
+		return x.OutputRoot
+	}
+	return ""
+}
+
+func (x *VerifyEntryRequest) GetIndex() int64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+type VerifyEntryResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Valid          bool                   `protobuf:"varint,1,opt,name=valid,proto3" json:"valid,omitempty"` // signature path from leaf terminates at a mirrored root
+	LeafSubject    string                 `protobuf:"bytes,2,opt,name=leaf_subject,json=leafSubject,proto3" json:"leaf_subject,omitempty"`
+	ChainSubjects  []string               `protobuf:"bytes,3,rep,name=chain_subjects,json=chainSubjects,proto3" json:"chain_subjects,omitempty"`     // issuer chain (leaf's issuer first), by subject
+	AnchorSubject  string                 `protobuf:"bytes,4,opt,name=anchor_subject,json=anchorSubject,proto3" json:"anchor_subject,omitempty"`     // the log-accepted root the chain terminates at
+	WithinValidity bool                   `protobuf:"varint,5,opt,name=within_validity,json=withinValidity,proto3" json:"within_validity,omitempty"` // every cert was time-valid at the entry's SCT timestamp
+	Reason         string                 `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`                                        // why valid is false (empty when valid)
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *VerifyEntryResponse) Reset() {
+	*x = VerifyEntryResponse{}
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyEntryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyEntryResponse) ProtoMessage() {}
+
+func (x *VerifyEntryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ctingestion_v2_ingestion_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyEntryResponse.ProtoReflect.Descriptor instead.
+func (*VerifyEntryResponse) Descriptor() ([]byte, []int) {
+	return file_ctingestion_v2_ingestion_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *VerifyEntryResponse) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
+func (x *VerifyEntryResponse) GetLeafSubject() string {
+	if x != nil {
+		return x.LeafSubject
+	}
+	return ""
+}
+
+func (x *VerifyEntryResponse) GetChainSubjects() []string {
+	if x != nil {
+		return x.ChainSubjects
+	}
+	return nil
+}
+
+func (x *VerifyEntryResponse) GetAnchorSubject() string {
+	if x != nil {
+		return x.AnchorSubject
+	}
+	return ""
+}
+
+func (x *VerifyEntryResponse) GetWithinValidity() bool {
+	if x != nil {
+		return x.WithinValidity
+	}
+	return false
+}
+
+func (x *VerifyEntryResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_ctingestion_v2_ingestion_proto protoreflect.FileDescriptor
 
 const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
@@ -1028,7 +1519,7 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\x0emonitoring_url\x18\x02 \x01(\tR\rmonitoringUrl\x127\n" +
 	"\bprotocol\x18\x03 \x01(\x0e2\x1b.ctingestion.v2.LogProtocolR\bprotocol\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x04 \x01(\fR\tpublicKey\"\xba\x03\n" +
+	"public_key\x18\x04 \x01(\fR\tpublicKey\"\xf9\x03\n" +
 	"\x14GetLogEntriesRequest\x12-\n" +
 	"\x03log\x18\x01 \x01(\v2\x1b.ctingestion.v2.LogSelectorR\x03log\x12\x1f\n" +
 	"\vstart_index\x18\x02 \x01(\x03R\n" +
@@ -1045,7 +1536,8 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\vgranularity\x18\t \x01(\x0e2$.ctingestion.v2.PartitionGranularityR\vgranularity\x12\x16\n" +
 	"\x06verify\x18\n" +
 	" \x01(\bR\x06verify\x12,\n" +
-	"\x12disable_keep_alive\x18\v \x01(\bR\x10disableKeepAlive\"\xb7\x01\n" +
+	"\x12disable_keep_alive\x18\v \x01(\bR\x10disableKeepAlive\x12=\n" +
+	"\vcompression\x18\f \x01(\x0e2\x1b.ctingestion.v2.CompressionR\vcompression\"\xb7\x01\n" +
 	"\x15GetLogEntriesResponse\x12'\n" +
 	"\x0fentries_written\x18\x01 \x01(\x03R\x0eentriesWritten\x12#\n" +
 	"\rbytes_written\x18\x02 \x01(\x03R\fbytesWritten\x12\x1f\n" +
@@ -1053,7 +1545,7 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"firstIndex\x12\x1d\n" +
 	"\n" +
 	"last_index\x18\x04 \x01(\x03R\tlastIndexJ\x04\b\x05\x10\x06R\n" +
-	"partitions\"\x94\x03\n" +
+	"partitions\"\xf8\x02\n" +
 	"\vRawLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12!\n" +
 	"\ftimestamp_ms\x18\x02 \x01(\x03R\vtimestampMs\x128\n" +
@@ -1061,14 +1553,12 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"entry_type\x18\x03 \x01(\x0e2\x19.ctingestion.v2.EntryTypeR\tentryType\x123\n" +
 	"\x06source\x18\x04 \x01(\x0e2\x1b.ctingestion.v2.LogProtocolR\x06source\x12\x1d\n" +
 	"\n" +
-	"leaf_input\x18\x05 \x01(\fR\tleafInput\x12\x1d\n" +
-	"\n" +
-	"extra_data\x18\x06 \x01(\fR\textraData\x12 \n" +
-	"\vcertificate\x18\a \x01(\fR\vcertificate\x12&\n" +
+	"leaf_input\x18\x05 \x01(\fR\tleafInput\x12&\n" +
 	"\x0eprecertificate\x18\b \x01(\fR\x0eprecertificate\x12&\n" +
 	"\x0fissuer_key_hash\x18\t \x01(\fR\rissuerKeyHash\x12-\n" +
 	"\x12chain_fingerprints\x18\n" +
-	" \x03(\fR\x11chainFingerprints\"\x80\x01\n" +
+	" \x03(\fR\x11chainFingerprintsJ\x04\b\x06\x10\aJ\x04\b\a\x10\bR\n" +
+	"extra_dataR\vcertificate\"\x80\x01\n" +
 	"\aLogMeta\x12\x15\n" +
 	"\x06log_id\x18\x01 \x01(\fR\x05logId\x12%\n" +
 	"\x0emonitoring_url\x18\x02 \x01(\tR\rmonitoringUrl\x127\n" +
@@ -1105,7 +1595,49 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\fcoverage_pct\x18\x05 \x01(\x01R\vcoveragePct\x12'\n" +
 	"\x0fpartition_files\x18\x06 \x01(\x03R\x0epartitionFiles\x12.\n" +
 	"\x04gaps\x18\a \x03(\v2\x1a.ctingestion.v2.IndexRangeR\x04gaps\x12\x1b\n" +
-	"\tsth_error\x18\b \x01(\tR\bsthError*T\n" +
+	"\tsth_error\x18\b \x01(\tR\bsthError\"\xeb\x01\n" +
+	"\x15ResolveIssuersRequest\x12-\n" +
+	"\x03log\x18\x01 \x01(\v2\x1b.ctingestion.v2.LogSelectorR\x03log\x12\x1f\n" +
+	"\voutput_root\x18\x02 \x01(\tR\n" +
+	"outputRoot\x12\x1d\n" +
+	"\n" +
+	"target_qps\x18\x03 \x01(\x01R\ttargetQps\x12+\n" +
+	"\x11fetch_concurrency\x18\x04 \x01(\x05R\x10fetchConcurrency\x12\x1d\n" +
+	"\n" +
+	"user_agent\x18\x05 \x01(\tR\tuserAgent\x12\x17\n" +
+	"\adry_run\x18\x06 \x01(\bR\x06dryRun\"\xab\x01\n" +
+	"\x16ResolveIssuersResponse\x12\x1e\n" +
+	"\n" +
+	"referenced\x18\x01 \x01(\x03R\n" +
+	"referenced\x12'\n" +
+	"\x0falready_present\x18\x02 \x01(\x03R\x0ealreadyPresent\x12\x18\n" +
+	"\afetched\x18\x03 \x01(\x03R\afetched\x12\x16\n" +
+	"\x06failed\x18\x04 \x01(\x03R\x06failed\x12\x16\n" +
+	"\x06errors\x18\x05 \x03(\tR\x06errors\"\xa2\x01\n" +
+	"\x12MirrorRootsRequest\x12-\n" +
+	"\x03log\x18\x01 \x01(\v2\x1b.ctingestion.v2.LogSelectorR\x03log\x12\x1f\n" +
+	"\voutput_root\x18\x02 \x01(\tR\n" +
+	"outputRoot\x12\x1d\n" +
+	"\n" +
+	"target_qps\x18\x03 \x01(\x01R\ttargetQps\x12\x1d\n" +
+	"\n" +
+	"user_agent\x18\x04 \x01(\tR\tuserAgent\"\x82\x01\n" +
+	"\x13MirrorRootsResponse\x12\x14\n" +
+	"\x05total\x18\x01 \x01(\x03R\x05total\x12'\n" +
+	"\x0falready_present\x18\x02 \x01(\x03R\x0ealreadyPresent\x12\x16\n" +
+	"\x06stored\x18\x03 \x01(\x03R\x06stored\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"K\n" +
+	"\x12VerifyEntryRequest\x12\x1f\n" +
+	"\voutput_root\x18\x01 \x01(\tR\n" +
+	"outputRoot\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\x03R\x05index\"\xdd\x01\n" +
+	"\x13VerifyEntryResponse\x12\x14\n" +
+	"\x05valid\x18\x01 \x01(\bR\x05valid\x12!\n" +
+	"\fleaf_subject\x18\x02 \x01(\tR\vleafSubject\x12%\n" +
+	"\x0echain_subjects\x18\x03 \x03(\tR\rchainSubjects\x12%\n" +
+	"\x0eanchor_subject\x18\x04 \x01(\tR\ranchorSubject\x12'\n" +
+	"\x0fwithin_validity\x18\x05 \x01(\bR\x0ewithinValidity\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason*T\n" +
 	"\tEntryType\x12\x1a\n" +
 	"\x16ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fENTRY_TYPE_X509\x10\x01\x12\x16\n" +
@@ -1113,13 +1645,20 @@ const file_ctingestion_v2_ingestion_proto_rawDesc = "" +
 	"\x14PartitionGranularity\x12%\n" +
 	"!PARTITION_GRANULARITY_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19PARTITION_GRANULARITY_DAY\x10\x01\x12\x1e\n" +
-	"\x1aPARTITION_GRANULARITY_HOUR\x10\x022\xe2\x02\n" +
+	"\x1aPARTITION_GRANULARITY_HOUR\x10\x02*V\n" +
+	"\vCompression\x12\x1b\n" +
+	"\x17COMPRESSION_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10COMPRESSION_NONE\x10\x01\x12\x14\n" +
+	"\x10COMPRESSION_GZIP\x10\x022\xf3\x04\n" +
 	"\x12CTIngestionService\x12\\\n" +
 	"\rGetLogEntries\x12$.ctingestion.v2.GetLogEntriesRequest\x1a%.ctingestion.v2.GetLogEntriesResponse\x12J\n" +
 	"\n" +
 	"GetLogList\x12!.ctingestion.v2.GetLogListRequest\x1a\x19.ctingestion.v2.CTLogList\x12D\n" +
 	"\x06GetSTH\x12\x1d.ctingestion.v2.GetSTHRequest\x1a\x1b.ctingestion.v2.STHResponse\x12\\\n" +
-	"\rCheckCoverage\x12$.ctingestion.v2.CheckCoverageRequest\x1a%.ctingestion.v2.CheckCoverageResponseB4Z2github.com/accretional/proto-ct/gen/ctingestion/v2b\x06proto3"
+	"\rCheckCoverage\x12$.ctingestion.v2.CheckCoverageRequest\x1a%.ctingestion.v2.CheckCoverageResponse\x12_\n" +
+	"\x0eResolveIssuers\x12%.ctingestion.v2.ResolveIssuersRequest\x1a&.ctingestion.v2.ResolveIssuersResponse\x12V\n" +
+	"\vMirrorRoots\x12\".ctingestion.v2.MirrorRootsRequest\x1a#.ctingestion.v2.MirrorRootsResponse\x12V\n" +
+	"\vVerifyEntry\x12\".ctingestion.v2.VerifyEntryRequest\x1a#.ctingestion.v2.VerifyEntryResponseB4Z2github.com/accretional/proto-ct/gen/ctingestion/v2b\x06proto3"
 
 var (
 	file_ctingestion_v2_ingestion_proto_rawDescOnce sync.Once
@@ -1133,51 +1672,67 @@ func file_ctingestion_v2_ingestion_proto_rawDescGZIP() []byte {
 	return file_ctingestion_v2_ingestion_proto_rawDescData
 }
 
-var file_ctingestion_v2_ingestion_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_ctingestion_v2_ingestion_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_ctingestion_v2_ingestion_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_ctingestion_v2_ingestion_proto_goTypes = []any{
-	(EntryType)(0),                // 0: ctingestion.v2.EntryType
-	(PartitionGranularity)(0),     // 1: ctingestion.v2.PartitionGranularity
-	(*LogSelector)(nil),           // 2: ctingestion.v2.LogSelector
-	(*GetLogEntriesRequest)(nil),  // 3: ctingestion.v2.GetLogEntriesRequest
-	(*GetLogEntriesResponse)(nil), // 4: ctingestion.v2.GetLogEntriesResponse
-	(*RawLogEntry)(nil),           // 5: ctingestion.v2.RawLogEntry
-	(*LogMeta)(nil),               // 6: ctingestion.v2.LogMeta
-	(*RawLogEntryBatch)(nil),      // 7: ctingestion.v2.RawLogEntryBatch
-	(*GetLogListRequest)(nil),     // 8: ctingestion.v2.GetLogListRequest
-	(*GetSTHRequest)(nil),         // 9: ctingestion.v2.GetSTHRequest
-	(*STHResponse)(nil),           // 10: ctingestion.v2.STHResponse
-	(*IndexRange)(nil),            // 11: ctingestion.v2.IndexRange
-	(*CheckCoverageRequest)(nil),  // 12: ctingestion.v2.CheckCoverageRequest
-	(*CheckCoverageResponse)(nil), // 13: ctingestion.v2.CheckCoverageResponse
-	(LogProtocol)(0),              // 14: ctingestion.v2.LogProtocol
-	(*CTLogList)(nil),             // 15: ctingestion.v2.CTLogList
+	(EntryType)(0),                 // 0: ctingestion.v2.EntryType
+	(PartitionGranularity)(0),      // 1: ctingestion.v2.PartitionGranularity
+	(Compression)(0),               // 2: ctingestion.v2.Compression
+	(*LogSelector)(nil),            // 3: ctingestion.v2.LogSelector
+	(*GetLogEntriesRequest)(nil),   // 4: ctingestion.v2.GetLogEntriesRequest
+	(*GetLogEntriesResponse)(nil),  // 5: ctingestion.v2.GetLogEntriesResponse
+	(*RawLogEntry)(nil),            // 6: ctingestion.v2.RawLogEntry
+	(*LogMeta)(nil),                // 7: ctingestion.v2.LogMeta
+	(*RawLogEntryBatch)(nil),       // 8: ctingestion.v2.RawLogEntryBatch
+	(*GetLogListRequest)(nil),      // 9: ctingestion.v2.GetLogListRequest
+	(*GetSTHRequest)(nil),          // 10: ctingestion.v2.GetSTHRequest
+	(*STHResponse)(nil),            // 11: ctingestion.v2.STHResponse
+	(*IndexRange)(nil),             // 12: ctingestion.v2.IndexRange
+	(*CheckCoverageRequest)(nil),   // 13: ctingestion.v2.CheckCoverageRequest
+	(*CheckCoverageResponse)(nil),  // 14: ctingestion.v2.CheckCoverageResponse
+	(*ResolveIssuersRequest)(nil),  // 15: ctingestion.v2.ResolveIssuersRequest
+	(*ResolveIssuersResponse)(nil), // 16: ctingestion.v2.ResolveIssuersResponse
+	(*MirrorRootsRequest)(nil),     // 17: ctingestion.v2.MirrorRootsRequest
+	(*MirrorRootsResponse)(nil),    // 18: ctingestion.v2.MirrorRootsResponse
+	(*VerifyEntryRequest)(nil),     // 19: ctingestion.v2.VerifyEntryRequest
+	(*VerifyEntryResponse)(nil),    // 20: ctingestion.v2.VerifyEntryResponse
+	(LogProtocol)(0),               // 21: ctingestion.v2.LogProtocol
+	(*CTLogList)(nil),              // 22: ctingestion.v2.CTLogList
 }
 var file_ctingestion_v2_ingestion_proto_depIdxs = []int32{
-	14, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
-	2,  // 1: ctingestion.v2.GetLogEntriesRequest.log:type_name -> ctingestion.v2.LogSelector
+	21, // 0: ctingestion.v2.LogSelector.protocol:type_name -> ctingestion.v2.LogProtocol
+	3,  // 1: ctingestion.v2.GetLogEntriesRequest.log:type_name -> ctingestion.v2.LogSelector
 	1,  // 2: ctingestion.v2.GetLogEntriesRequest.granularity:type_name -> ctingestion.v2.PartitionGranularity
-	0,  // 3: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
-	14, // 4: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
-	14, // 5: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
-	6,  // 6: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
-	5,  // 7: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
-	2,  // 8: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
-	2,  // 9: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
-	11, // 10: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
-	3,  // 11: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
-	8,  // 12: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
-	9,  // 13: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
-	12, // 14: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
-	4,  // 15: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
-	15, // 16: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
-	10, // 17: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
-	13, // 18: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
-	15, // [15:19] is the sub-list for method output_type
-	11, // [11:15] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	2,  // 3: ctingestion.v2.GetLogEntriesRequest.compression:type_name -> ctingestion.v2.Compression
+	0,  // 4: ctingestion.v2.RawLogEntry.entry_type:type_name -> ctingestion.v2.EntryType
+	21, // 5: ctingestion.v2.RawLogEntry.source:type_name -> ctingestion.v2.LogProtocol
+	21, // 6: ctingestion.v2.LogMeta.protocol:type_name -> ctingestion.v2.LogProtocol
+	7,  // 7: ctingestion.v2.RawLogEntryBatch.log:type_name -> ctingestion.v2.LogMeta
+	6,  // 8: ctingestion.v2.RawLogEntryBatch.entries:type_name -> ctingestion.v2.RawLogEntry
+	3,  // 9: ctingestion.v2.GetSTHRequest.log:type_name -> ctingestion.v2.LogSelector
+	3,  // 10: ctingestion.v2.CheckCoverageRequest.log:type_name -> ctingestion.v2.LogSelector
+	12, // 11: ctingestion.v2.CheckCoverageResponse.gaps:type_name -> ctingestion.v2.IndexRange
+	3,  // 12: ctingestion.v2.ResolveIssuersRequest.log:type_name -> ctingestion.v2.LogSelector
+	3,  // 13: ctingestion.v2.MirrorRootsRequest.log:type_name -> ctingestion.v2.LogSelector
+	4,  // 14: ctingestion.v2.CTIngestionService.GetLogEntries:input_type -> ctingestion.v2.GetLogEntriesRequest
+	9,  // 15: ctingestion.v2.CTIngestionService.GetLogList:input_type -> ctingestion.v2.GetLogListRequest
+	10, // 16: ctingestion.v2.CTIngestionService.GetSTH:input_type -> ctingestion.v2.GetSTHRequest
+	13, // 17: ctingestion.v2.CTIngestionService.CheckCoverage:input_type -> ctingestion.v2.CheckCoverageRequest
+	15, // 18: ctingestion.v2.CTIngestionService.ResolveIssuers:input_type -> ctingestion.v2.ResolveIssuersRequest
+	17, // 19: ctingestion.v2.CTIngestionService.MirrorRoots:input_type -> ctingestion.v2.MirrorRootsRequest
+	19, // 20: ctingestion.v2.CTIngestionService.VerifyEntry:input_type -> ctingestion.v2.VerifyEntryRequest
+	5,  // 21: ctingestion.v2.CTIngestionService.GetLogEntries:output_type -> ctingestion.v2.GetLogEntriesResponse
+	22, // 22: ctingestion.v2.CTIngestionService.GetLogList:output_type -> ctingestion.v2.CTLogList
+	11, // 23: ctingestion.v2.CTIngestionService.GetSTH:output_type -> ctingestion.v2.STHResponse
+	14, // 24: ctingestion.v2.CTIngestionService.CheckCoverage:output_type -> ctingestion.v2.CheckCoverageResponse
+	16, // 25: ctingestion.v2.CTIngestionService.ResolveIssuers:output_type -> ctingestion.v2.ResolveIssuersResponse
+	18, // 26: ctingestion.v2.CTIngestionService.MirrorRoots:output_type -> ctingestion.v2.MirrorRootsResponse
+	20, // 27: ctingestion.v2.CTIngestionService.VerifyEntry:output_type -> ctingestion.v2.VerifyEntryResponse
+	21, // [21:28] is the sub-list for method output_type
+	14, // [14:21] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_ctingestion_v2_ingestion_proto_init() }
@@ -1191,8 +1746,8 @@ func file_ctingestion_v2_ingestion_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ctingestion_v2_ingestion_proto_rawDesc), len(file_ctingestion_v2_ingestion_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   12,
+			NumEnums:      3,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -42,7 +42,7 @@ func newRFC6962Fetcher(sel *pb.LogSelector, userAgent string, qps float64, pageS
 	return &rfc6962Fetcher{lc: lc, batchSize: bs, parallel: par}, nil
 }
 
-func (f *rfc6962Fetcher) Fetch(ctx context.Context, start, end int64, sink func([]*pb.RawLogEntry) error) error {
+func (f *rfc6962Fetcher) Fetch(ctx context.Context, start, end int64, sink func(entryBatch) error) error {
 	// Clamp to the current tree: scanner workers that request past the tree get
 	// empty responses and would spin (advancing by 0).
 	sth, err := f.lc.GetSTH(ctx)
@@ -76,15 +76,24 @@ func (f *rfc6962Fetcher) Fetch(ctx context.Context, start, end int64, sink func(
 
 	runErr := fetcher.Run(ctx, func(b scanner.EntryBatch) {
 		entries := make([]*pb.RawLogEntry, 0, len(b.Entries))
+		var chains []chainCert
+		seen := make(map[[32]byte]struct{}) // collapse the obvious per-batch chain dups
 		for i, le := range b.Entries {
-			r, err := rawEntryFromRFC6962(b.Start+int64(i), le.LeafInput, le.ExtraData)
+			r, cs, err := rawEntryFromRFC6962(b.Start+int64(i), le.LeafInput, le.ExtraData)
 			if err != nil {
 				fail(err)
 				return
 			}
 			entries = append(entries, r)
+			for _, c := range cs {
+				if _, ok := seen[c.hash]; ok {
+					continue
+				}
+				seen[c.hash] = struct{}{}
+				chains = append(chains, c)
+			}
 		}
-		if err := sink(entries); err != nil {
+		if err := sink(entryBatch{entries: entries, chains: chains}); err != nil {
 			fail(err)
 		}
 	})

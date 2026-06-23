@@ -9,6 +9,15 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// entryBatch is one unit handed to a sink: a contiguous run of leaf records plus
+// any issuer-chain certs parsed alongside them (RFC 6962 only; the sink dedupes
+// these into the shared issuer store). static-ct-api records carry chain
+// fingerprints but not the certs themselves, so chains is nil there.
+type entryBatch struct {
+	entries []*pb.RawLogEntry
+	chains  []chainCert
+}
+
 // RangeFetcher fetches entries with index in [start, end) from a single log and
 // hands them to sink in contiguous, index-ordered batches. Each batch's entries
 // are consecutive (entry i has index entries[0].Index+i). Batches from different
@@ -17,7 +26,7 @@ import (
 // concurrent use. Implementations are protocol-specific (RFC 6962 get-entries vs
 // static-ct-api tiles).
 type RangeFetcher interface {
-	Fetch(ctx context.Context, start, end int64, sink func(entries []*pb.RawLogEntry) error) error
+	Fetch(ctx context.Context, start, end int64, sink func(entryBatch) error) error
 }
 
 // rateLimitedTransport wraps an http.RoundTripper with a QPS limiter. Shared by

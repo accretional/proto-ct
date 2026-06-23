@@ -50,7 +50,7 @@ func newTileFetcher(sel *pb.LogSelector, userAgent string, qps float64, concurre
 	}, nil
 }
 
-func (f *tileFetcher) Fetch(ctx context.Context, start, end int64, sink func([]*pb.RawLogEntry) error) error {
+func (f *tileFetcher) Fetch(ctx context.Context, start, end int64, sink func(entryBatch) error) error {
 	// No checkpoint is served, so the readable frontier comes from RFC6962 get-sth,
 	// clamped down to the last COMPLETE 256-tile (partial tiles aren't served).
 	sth, err := f.lc.GetSTH(ctx)
@@ -105,7 +105,7 @@ func (f *tileFetcher) Fetch(ctx context.Context, start, end int64, sink func([]*
 					batch = append(batch, r)
 				}
 				if len(batch) > 0 {
-					if err := sink(batch); err != nil {
+					if err := sink(entryBatch{entries: batch}); err != nil {
 						fail(err)
 					}
 				}
