@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -257,19 +258,37 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 		partW = newGzipWriter(base)
 	}
 
-	// RFC6962 carries the issuer chain inline (extra_data); we dedupe it into the
-	// shared issuer store rather than repeating it per leaf. static/tile records
-	// carry chain fingerprints only (certs live at the log's issuer endpoint), so
-	// they never feed the store — leave it nil for them.
+	// Every protocol populates the same content-addressed issuer store so both
+	// source types end up with identical on-disk shape. RFC6962 carries the chain
+	// inline (extra_data) → write it directly. static/tile carry only chain
+	// fingerprints (certs live at the log's issuer/<hash> endpoint) → resolve them
+	// inline, best-effort: failures never fail the ingest, and certs already on
+	// disk are skipped, so this is a cheap no-op on re-runs.
 	var issuers *issuerStore
-	if sel.Protocol == pb.LogProtocol_LOG_PROTOCOL_RFC6962 {
-		issuers = newIssuerStore(base)
+	switch sel.Protocol {
+	case pb.LogProtocol_LOG_PROTOCOL_RFC6962:
+		issuers = newIssuerStore(base, nil)
+	case pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API, pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API_NO_CHECKPOINT:
+		ihc := httpClientFor(req.GetTargetQps(), false)
+		prefix := sel.MonitoringUrl
+		issuers = newIssuerStore(base, func(ctx context.Context, fp [32]byte) ([]byte, error) {
+			return fetchIssuerDER(ctx, ihc, prefix, ua, fp)
+		})
 	}
 	sink := newBatchSink(partW, meta, req.GetGranularity(), issuers)
 
 	sinkFn := func(b entryBatch) error { return sink.writeBatch(ctx, b) }
 	if err := fetcher.Fetch(ctx, req.GetStartIndex(), req.GetEndIndex(), sinkFn); err != nil {
 		return nil, status.Errorf(codes.Internal, "fetch range: %v", err)
+	}
+	if issuers != nil {
+		if f, fail, errs := issuers.resolveStats(); f > 0 || fail > 0 {
+			msg := fmt.Sprintf("issuer resolution: %d fetched, %d failed", f, fail)
+			if len(errs) > 0 {
+				msg += " (e.g. " + errs[0] + ")"
+			}
+			log.Print(msg)
+		}
 	}
 
 	return &pb.GetLogEntriesResponse{

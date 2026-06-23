@@ -23,6 +23,10 @@ type Writer interface {
 	// concurrent batches/jobs and the bytes are identical by construction, so it
 	// must be safe for concurrent writes to the same path.
 	PutIfAbsent(ctx context.Context, relPath string, data []byte) error
+
+	// Has reports whether relPath already exists. Used to skip the (network) work
+	// of resolving an issuer cert that is already stored.
+	Has(ctx context.Context, relPath string) (bool, error)
 }
 
 // LocalFSWriter writes partition files under Root via a tmp-file + atomic rename,
@@ -48,6 +52,17 @@ func (w *LocalFSWriter) Put(_ context.Context, relPath string, data []byte) erro
 		return err
 	}
 	return nil
+}
+
+func (w *LocalFSWriter) Has(_ context.Context, relPath string) (bool, error) {
+	_, err := os.Stat(filepath.Join(w.Root, filepath.FromSlash(relPath)))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (w *LocalFSWriter) PutIfAbsent(_ context.Context, relPath string, data []byte) error {
@@ -127,4 +142,8 @@ func (g *gzipWriter) PutIfAbsent(ctx context.Context, relPath string, data []byt
 		return err
 	}
 	return g.inner.PutIfAbsent(ctx, relPath+".gz", z)
+}
+
+func (g *gzipWriter) Has(ctx context.Context, relPath string) (bool, error) {
+	return g.inner.Has(ctx, relPath+".gz")
 }

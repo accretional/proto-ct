@@ -102,14 +102,19 @@ shape and both minimal (~1–1.6 KB/entry). Cleanest long-term; biggest aggregat
 - **Done:** with O1+O2 in, both `rawEntryFromRFC6962` and `rawEntryFromStatic` emit the same
   fields (`leaf_input`, `chain_fingerprints`, and for precerts `precertificate` + `issuer_key_hash`).
   Fingerprints use the same SHA-256-of-DER on both paths, so the fingerprint semantics are uniform.
-- **Issuer-store unification (`ResolveIssuers`):** RFC6962 writes chain certs to the local store
-  during ingestion (the log has no issuer endpoint); static records carry only fingerprints (certs
-  live at the log's `issuer/<hash>` endpoint). The `ResolveIssuers` RPC / `-mode resolve-issuers`
-  closes that gap: it scans a static output_root, fetches each referenced-but-missing chain cert
-  from `<monitoring_url>/issuer/<hex>`, verifies `sha256(DER) == fingerprint`, and writes it into
-  the same `<output_root>/issuers/<hex>.der` store. Idempotent/rerunnable. After it runs, **both
-  source types have an identical on-disk shape and chains validate fully offline.** (Verified live
-  on LE Sycamore: 45 unique issuers fetched from 512 entries, invariant holds, rerun is a no-op.)
+- **Issuer-store unification — automatic.** RFC6962 writes chain certs to the local store during
+  ingestion (the log has no issuer endpoint); static records carry only fingerprints (certs live at
+  the log's `issuer/<hash>` endpoint). `GetLogEntries` now **always resolves static issuers inline,
+  best-effort**: as entries stream in it fetches each referenced-but-missing chain cert from
+  `<monitoring_url>/issuer/<hex>`, verifies `sha256(DER) == fingerprint`, and writes it to the same
+  `<output_root>/issuers/<hex>.der` store. Deduped across batches, skips certs already on disk (a
+  cheap no-op on re-runs), and never fails the ingest if the endpoint is flaky/absent (counted +
+  logged; the standalone pass backfills). So a plain static fetch already yields the unified,
+  offline-validatable layout. (Verified live on LE Sycamore: 512 entries → 45 issuers stored inline,
+  0 failures, invariant holds.)
+- **`ResolveIssuers` RPC / `-mode resolve-issuers`** remains as a standalone backfill/retry pass:
+  it scans an existing output_root and resolves any still-missing issuers (e.g. for data ingested
+  before this was automatic, or after transient endpoint failures). Idempotent/rerunnable.
 
 ### O4 — compression (orthogonal multiplier) — ✅ IMPLEMENTED (gzip)
 gzip the partition `.binpb` files. Stacks on top of O1/O2/O3 (dedup already removed the bulk of

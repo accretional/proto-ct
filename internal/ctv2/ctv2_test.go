@@ -162,6 +162,13 @@ func (m *memWriter) PutIfAbsent(_ context.Context, relPath string, data []byte) 
 	return nil
 }
 
+func (m *memWriter) Has(_ context.Context, relPath string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.files[relPath]
+	return ok, nil
+}
+
 func (m *memWriter) has(suffix string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -268,7 +275,7 @@ func TestBatchSink_ConcurrentBatchesSafe(t *testing.T) {
 
 func TestIssuerStore_DedupesAndWritesOnce(t *testing.T) {
 	mw := &memWriter{}
-	store := newIssuerStore(mw)
+	store := newIssuerStore(mw, nil)
 	ctx := context.Background()
 
 	caA := []byte("CA-cert-A")
@@ -314,7 +321,7 @@ func TestBatchSink_WritesIssuerCerts(t *testing.T) {
 	}
 
 	mw := &memWriter{}
-	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, newIssuerStore(mw))
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, newIssuerStore(mw, nil))
 	if err := s.writeBatch(context.Background(), entryBatch{entries: []*pb.RawLogEntry{r}, chains: chains}); err != nil {
 		t.Fatalf("writeBatch: %v", err)
 	}

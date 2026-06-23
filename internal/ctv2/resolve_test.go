@@ -6,11 +6,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
@@ -141,6 +143,82 @@ func TestResolveIssuers_FetchesMissingStaticChains(t *testing.T) {
 	}
 	if again.AlreadyPresent != 2 || again.Fetched != 0 {
 		t.Errorf("rerun: present=%d fetched=%d, want 2/0", again.AlreadyPresent, again.Fetched)
+	}
+}
+
+// TestIssuerStore_InlineResolve exercises the always-on static ingest path: the
+// sink resolves issuer fingerprints to the store, deduping across batches.
+func TestIssuerStore_InlineResolve(t *testing.T) {
+	caA, caB := []byte("inline-CA-A"), []byte("inline-CA-B")
+	fpA, fpB := sha256.Sum256(caA), sha256.Sum256(caB)
+	known := map[[32]byte][]byte{fpA: caA, fpB: caB}
+	var calls int32
+	resolver := func(_ context.Context, fp [32]byte) ([]byte, error) {
+		atomic.AddInt32(&calls, 1)
+		if der, ok := known[fp]; ok {
+			return der, nil
+		}
+		return nil, fmt.Errorf("HTTP 404")
+	}
+	mw := &memWriter{}
+	store := newIssuerStore(mw, resolver)
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, store)
+	ctx := context.Background()
+
+	// Two batches sharing fpA; the second adds fpB and a bogus fp the resolver 404s.
+	bogus := sha256.Sum256([]byte("missing-issuer"))
+	if err := s.writeBatch(ctx, entryBatch{entries: []*pb.RawLogEntry{staticEntry(0, fpA)}}); err != nil {
+		t.Fatalf("writeBatch 1: %v", err)
+	}
+	// A 404 on an issuer must NOT fail the batch (best-effort).
+	if err := s.writeBatch(ctx, entryBatch{entries: []*pb.RawLogEntry{staticEntry(1, fpA, fpB, bogus)}}); err != nil {
+		t.Fatalf("writeBatch 2 should be non-fatal on issuer 404: %v", err)
+	}
+
+	fetched, failed, _ := store.resolveStats()
+	if fetched != 2 || failed != 1 {
+		t.Errorf("fetched=%d failed=%d, want 2/1", fetched, failed)
+	}
+	// fpA fetched once despite appearing in both batches (cross-batch dedup).
+	if calls != 3 { // fpA, fpB, bogus — each attempted exactly once
+		t.Errorf("resolver called %d times, want 3 (deduped)", calls)
+	}
+	if !mw.has(issuerStorePath(fpA)) || !mw.has(issuerStorePath(fpB)) {
+		t.Errorf("resolved issuers not stored")
+	}
+	if mw.has(issuerStorePath(bogus)) {
+		t.Errorf("unresolvable issuer must not be stored")
+	}
+	// Partitions still written despite the issuer failure.
+	if s.entriesWritten != 2 {
+		t.Errorf("entriesWritten=%d, want 2", s.entriesWritten)
+	}
+}
+
+// TestIssuerStore_InlineResolveSkipsPresent confirms a cert already on disk is a
+// no-op (no resolver call) — the cheap re-run case.
+func TestIssuerStore_InlineResolveSkipsPresent(t *testing.T) {
+	ca := []byte("already-here")
+	fp := sha256.Sum256(ca)
+	mw := &memWriter{}
+	// Pre-populate the store.
+	if err := mw.PutIfAbsent(context.Background(), issuerStorePath(fp), ca); err != nil {
+		t.Fatal(err)
+	}
+	var calls int32
+	store := newIssuerStore(mw, func(_ context.Context, _ [32]byte) ([]byte, error) {
+		atomic.AddInt32(&calls, 1)
+		return ca, nil
+	})
+	s := newBatchSink(mw, &pb.LogMeta{MonitoringUrl: "x"}, pb.PartitionGranularity_PARTITION_GRANULARITY_DAY, store)
+	if err := s.writeBatch(context.Background(), entryBatch{entries: []*pb.RawLogEntry{staticEntry(0, fp)}}); err != nil {
+		t.Fatalf("writeBatch: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("resolver called %d times for an already-stored issuer, want 0", calls)
+	}
+	if f, _, _ := store.resolveStats(); f != 0 {
+		t.Errorf("fetched=%d, want 0 (already present)", f)
 	}
 }
 

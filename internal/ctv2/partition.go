@@ -61,8 +61,8 @@ func newBatchSink(w Writer, meta *pb.LogMeta, gran pb.PartitionGranularity, issu
 // fingerprints always resolve (an orphaned issuer cert on a crash is harmless; a
 // dangling fingerprint would not be).
 func (s *batchSink) writeBatch(ctx context.Context, b entryBatch) error {
-	if s.issuers != nil && len(b.chains) > 0 {
-		if err := s.issuers.put(ctx, b.chains); err != nil {
+	if s.issuers != nil {
+		if err := s.issuers.ingest(ctx, b); err != nil {
 			return err
 		}
 	}
