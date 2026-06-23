@@ -24,6 +24,8 @@ const (
 	CTIngestionService_GetSTH_FullMethodName         = "/ctingestion.v2.CTIngestionService/GetSTH"
 	CTIngestionService_CheckCoverage_FullMethodName  = "/ctingestion.v2.CTIngestionService/CheckCoverage"
 	CTIngestionService_ResolveIssuers_FullMethodName = "/ctingestion.v2.CTIngestionService/ResolveIssuers"
+	CTIngestionService_MirrorRoots_FullMethodName    = "/ctingestion.v2.CTIngestionService/MirrorRoots"
+	CTIngestionService_VerifyEntry_FullMethodName    = "/ctingestion.v2.CTIngestionService/VerifyEntry"
 )
 
 // CTIngestionServiceClient is the client API for CTIngestionService service.
@@ -62,6 +64,19 @@ type CTIngestionServiceClient interface {
 	// every issuer is present). After it runs, chains validate fully offline for
 	// both source types.
 	ResolveIssuers(ctx context.Context, in *ResolveIssuersRequest, opts ...grpc.CallOption) (*ResolveIssuersResponse, error)
+	// MirrorRoots fetches the log's accepted roots (get-roots, served from the
+	// RFC6962 url / static submission_url) and stores each verbatim, content-
+	// addressed, at <output_root>/roots/<hex>.der. These are the log's declared
+	// trust anchors — the correct anchor set for "would this log accept this
+	// chain". GetLogEntries also does this automatically (best-effort, once per
+	// call); this RPC is the standalone backfill/refresh. Idempotent.
+	MirrorRoots(ctx context.Context, in *MirrorRootsRequest, opts ...grpc.CallOption) (*MirrorRootsResponse, error)
+	// VerifyEntry reconstructs and validates a single entry's certificate chain
+	// fully offline: leaf (from the partition) + issuer chain (from the local
+	// issuer store, by fingerprint) + the mirrored roots as trust anchors. It
+	// checks the issuance signature path terminates at a log-accepted root, at the
+	// entry's SCT timestamp.
+	VerifyEntry(ctx context.Context, in *VerifyEntryRequest, opts ...grpc.CallOption) (*VerifyEntryResponse, error)
 }
 
 type cTIngestionServiceClient struct {
@@ -122,6 +137,26 @@ func (c *cTIngestionServiceClient) ResolveIssuers(ctx context.Context, in *Resol
 	return out, nil
 }
 
+func (c *cTIngestionServiceClient) MirrorRoots(ctx context.Context, in *MirrorRootsRequest, opts ...grpc.CallOption) (*MirrorRootsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MirrorRootsResponse)
+	err := c.cc.Invoke(ctx, CTIngestionService_MirrorRoots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cTIngestionServiceClient) VerifyEntry(ctx context.Context, in *VerifyEntryRequest, opts ...grpc.CallOption) (*VerifyEntryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyEntryResponse)
+	err := c.cc.Invoke(ctx, CTIngestionService_VerifyEntry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CTIngestionServiceServer is the server API for CTIngestionService service.
 // All implementations must embed UnimplementedCTIngestionServiceServer
 // for forward compatibility.
@@ -158,6 +193,19 @@ type CTIngestionServiceServer interface {
 	// every issuer is present). After it runs, chains validate fully offline for
 	// both source types.
 	ResolveIssuers(context.Context, *ResolveIssuersRequest) (*ResolveIssuersResponse, error)
+	// MirrorRoots fetches the log's accepted roots (get-roots, served from the
+	// RFC6962 url / static submission_url) and stores each verbatim, content-
+	// addressed, at <output_root>/roots/<hex>.der. These are the log's declared
+	// trust anchors — the correct anchor set for "would this log accept this
+	// chain". GetLogEntries also does this automatically (best-effort, once per
+	// call); this RPC is the standalone backfill/refresh. Idempotent.
+	MirrorRoots(context.Context, *MirrorRootsRequest) (*MirrorRootsResponse, error)
+	// VerifyEntry reconstructs and validates a single entry's certificate chain
+	// fully offline: leaf (from the partition) + issuer chain (from the local
+	// issuer store, by fingerprint) + the mirrored roots as trust anchors. It
+	// checks the issuance signature path terminates at a log-accepted root, at the
+	// entry's SCT timestamp.
+	VerifyEntry(context.Context, *VerifyEntryRequest) (*VerifyEntryResponse, error)
 	mustEmbedUnimplementedCTIngestionServiceServer()
 }
 
@@ -182,6 +230,12 @@ func (UnimplementedCTIngestionServiceServer) CheckCoverage(context.Context, *Che
 }
 func (UnimplementedCTIngestionServiceServer) ResolveIssuers(context.Context, *ResolveIssuersRequest) (*ResolveIssuersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveIssuers not implemented")
+}
+func (UnimplementedCTIngestionServiceServer) MirrorRoots(context.Context, *MirrorRootsRequest) (*MirrorRootsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MirrorRoots not implemented")
+}
+func (UnimplementedCTIngestionServiceServer) VerifyEntry(context.Context, *VerifyEntryRequest) (*VerifyEntryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyEntry not implemented")
 }
 func (UnimplementedCTIngestionServiceServer) mustEmbedUnimplementedCTIngestionServiceServer() {}
 func (UnimplementedCTIngestionServiceServer) testEmbeddedByValue()                            {}
@@ -294,6 +348,42 @@ func _CTIngestionService_ResolveIssuers_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CTIngestionService_MirrorRoots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MirrorRootsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CTIngestionServiceServer).MirrorRoots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CTIngestionService_MirrorRoots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CTIngestionServiceServer).MirrorRoots(ctx, req.(*MirrorRootsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CTIngestionService_VerifyEntry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyEntryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CTIngestionServiceServer).VerifyEntry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CTIngestionService_VerifyEntry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CTIngestionServiceServer).VerifyEntry(ctx, req.(*VerifyEntryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CTIngestionService_ServiceDesc is the grpc.ServiceDesc for CTIngestionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -320,6 +410,14 @@ var CTIngestionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveIssuers",
 			Handler:    _CTIngestionService_ResolveIssuers_Handler,
+		},
+		{
+			MethodName: "MirrorRoots",
+			Handler:    _CTIngestionService_MirrorRoots_Handler,
+		},
+		{
+			MethodName: "VerifyEntry",
+			Handler:    _CTIngestionService_VerifyEntry_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

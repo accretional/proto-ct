@@ -161,6 +161,28 @@ func (s *Service) resolveSelector(ctx context.Context, sel *pb.LogSelector) (*pb
 	return out, nil
 }
 
+// getRootsBase returns the base URL that serves the RFC6962 get-roots endpoint:
+// a static log's submission_url, else the RFC6962 url. Resolved via the log list
+// when log_id is known, falling back to an explicit RFC6962 monitoring_url.
+// Returns "" when it can't be determined (e.g. a static log given by URL only).
+func (s *Service) getRootsBase(ctx context.Context, sel *pb.LogSelector) string {
+	if len(sel.GetLogId()) > 0 {
+		if lg, err := s.lookupLog(ctx, sel.GetLogId()); err == nil {
+			if lg.GetProtocol() == pb.LogProtocol_LOG_PROTOCOL_STATIC_CT_API {
+				if u := lg.GetSubmissionUrl(); u != "" {
+					return u
+				}
+			} else if u := lg.GetUrl(); u != "" {
+				return u
+			}
+		}
+	}
+	if sel.GetProtocol() == pb.LogProtocol_LOG_PROTOCOL_RFC6962 {
+		return sel.GetMonitoringUrl() // for RFC6962 the monitoring base is the API base
+	}
+	return ""
+}
+
 // ── GetSTH ───────────────────────────────────────────────────────────────────
 
 func (s *Service) GetSTH(ctx context.Context, req *pb.GetSTHRequest) (*pb.STHResponse, error) {
@@ -288,6 +310,19 @@ func (s *Service) GetLogEntries(ctx context.Context, req *pb.GetLogEntriesReques
 				msg += " (e.g. " + errs[0] + ")"
 			}
 			log.Print(msg)
+		}
+	}
+
+	// Mirror the log's accepted roots once (best-effort): they're the trust anchors
+	// for offline chain validation. Skip if already mirrored to avoid re-downloading
+	// the full root set on every range job; MirrorRoots refreshes on demand.
+	if !rootsAlreadyMirrored(root) {
+		if rootsBase := s.getRootsBase(ctx, sel); rootsBase != "" {
+			if total, _, stored, rerr := mirrorRoots(ctx, base, s.httpClient, rootsBase, ua); rerr != nil {
+				log.Printf("mirror roots: %v", rerr)
+			} else if stored > 0 {
+				log.Printf("mirrored %d accepted roots (%d total)", stored, total)
+			}
 		}
 	}
 
@@ -447,5 +482,61 @@ func (s *Service) ResolveIssuers(ctx context.Context, req *pb.ResolveIssuersRequ
 
 	resp.Fetched = fetched
 	resp.Failed = failed
+	return resp, nil
+}
+
+// ── MirrorRoots ──────────────────────────────────────────────────────────────
+
+func (s *Service) MirrorRoots(ctx context.Context, req *pb.MirrorRootsRequest) (*pb.MirrorRootsResponse, error) {
+	root := req.GetOutputRoot()
+	if root == "" {
+		root = s.defaultRoot
+	}
+	if root == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required (no server default configured)")
+	}
+	sel, err := s.resolveSelector(ctx, req.GetLog())
+	if err != nil {
+		return nil, err
+	}
+	base := s.getRootsBase(ctx, sel)
+	if base == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"cannot determine get-roots endpoint; provide a log_id (or an RFC6962 url)")
+	}
+	ua := req.GetUserAgent()
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	hc := httpClientFor(req.GetTargetQps(), false)
+	resp := &pb.MirrorRootsResponse{}
+	total, present, stored, err := mirrorRoots(ctx, &LocalFSWriter{Root: root}, hc, base, ua)
+	resp.Total = int64(total)
+	resp.AlreadyPresent = int64(present)
+	resp.Stored = int64(stored)
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return resp, nil
+}
+
+// ── VerifyEntry ──────────────────────────────────────────────────────────────
+
+func (s *Service) VerifyEntry(ctx context.Context, req *pb.VerifyEntryRequest) (*pb.VerifyEntryResponse, error) {
+	root := req.GetOutputRoot()
+	if root == "" {
+		root = s.defaultRoot
+	}
+	if root == "" {
+		return nil, status.Error(codes.InvalidArgument, "output_root required (no server default configured)")
+	}
+	e, err := findEntry(root, req.GetIndex())
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	}
+	resp, err := verifyEntryChain(root, e)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "verify: %v", err)
+	}
 	return resp, nil
 }

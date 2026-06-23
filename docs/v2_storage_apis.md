@@ -116,6 +116,28 @@ shape and both minimal (~1–1.6 KB/entry). Cleanest long-term; biggest aggregat
   it scans an existing output_root and resolves any still-missing issuers (e.g. for data ingested
   before this was automatic, or after transient endpoint failures). Idempotent/rerunnable.
 
+### Accepted roots + offline chain validation
+The leaf + issuer store reconstruct a chain, but validating it needs the log's **trust anchors**
+(the set it accepts chains to). We mirror those alongside the data:
+- **Store (`MirrorRoots` / automatic).** `GetLogEntries` mirrors the log's `get-roots` once per
+  output_root (best-effort): RFC6962 logs serve it at their `url`, static logs at `submission_url`
+  (resolved via the log list). Each accepted root is written content-addressed to
+  `<output_root>/roots/<hex>.der` (same `sha256(file) == hex` invariant as issuers). `-mode
+  mirror-roots` / the `MirrorRoots` RPC refresh on demand.
+- **Use (`VerifyEntry`).** `VerifyEntry` / `-mode verify -index N` validates an entry fully offline:
+  it pulls the leaf (from the partition), walks `chain_fingerprints` through the local issuer store,
+  verifies the **issuance signature path** link-by-link, and requires it to terminate at a mirrored
+  accepted root (the cert is a root, or is signed by one). Signature-path only (not full RFC5280
+  policy), via the CT-aware `ctgo/x509` fork — so it handles precerts (poison ignored) and legacy
+  SHA-1 chains that crypto/x509 rejects. It also reports `within_validity` (every cert time-valid at
+  the entry's SCT timestamp) separately from `valid`.
+- **Verified live:** LE Sycamore + Argon — a plain fetch auto-mirrors issuers (inline) + roots
+  (496 / 656), and entries verify VALID anchored at the expected roots (e.g. real AWS cert →
+  `Amazon Root CA 1`; Google test certs anchor correctly but report `within_validity=false`, being
+  future-dated). Both source types share one layout: `partitions + issuers/ + roots/`.
+- **Still not offline:** Merkle *inclusion* proofs (STH/tree tiles not stored) and SCT signature
+  verification on the issued cert (not in the log). Those remain a live-fetch or a future storage add.
+
 ### O4 — compression (orthogonal multiplier) — ✅ IMPLEMENTED (gzip)
 gzip the partition `.binpb` files. Stacks on top of O1/O2/O3 (dedup already removed the bulk of
 the redundancy; compression trims what's left of the per-leaf DER).

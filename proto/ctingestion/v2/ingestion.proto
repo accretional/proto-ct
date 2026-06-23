@@ -42,6 +42,21 @@ service CTIngestionService {
   // every issuer is present). After it runs, chains validate fully offline for
   // both source types.
   rpc ResolveIssuers(ResolveIssuersRequest) returns (ResolveIssuersResponse);
+
+  // MirrorRoots fetches the log's accepted roots (get-roots, served from the
+  // RFC6962 url / static submission_url) and stores each verbatim, content-
+  // addressed, at <output_root>/roots/<hex>.der. These are the log's declared
+  // trust anchors — the correct anchor set for "would this log accept this
+  // chain". GetLogEntries also does this automatically (best-effort, once per
+  // call); this RPC is the standalone backfill/refresh. Idempotent.
+  rpc MirrorRoots(MirrorRootsRequest) returns (MirrorRootsResponse);
+
+  // VerifyEntry reconstructs and validates a single entry's certificate chain
+  // fully offline: leaf (from the partition) + issuer chain (from the local
+  // issuer store, by fingerprint) + the mirrored roots as trust anchors. It
+  // checks the issuance signature path terminates at a log-accepted root, at the
+  // entry's SCT timestamp.
+  rpc VerifyEntry(VerifyEntryRequest) returns (VerifyEntryResponse);
 }
 
 enum EntryType {
@@ -235,4 +250,35 @@ message ResolveIssuersResponse {
   int64 failed         = 4; // fetch/verify failures
   // A bounded sample of failures ("<hex fingerprint>: <reason>") for debugging.
   repeated string errors = 5;
+}
+
+message MirrorRootsRequest {
+  // Selector locates the get-roots endpoint: the RFC6962 `url` for RFC6962 logs,
+  // the static `submission_url` for static logs (resolved via the log list when
+  // log_id is given). output_root is where roots/<hex>.der are written.
+  LogSelector log = 1;
+  string output_root = 2;
+  double target_qps = 3;
+  string user_agent = 4;
+}
+
+message MirrorRootsResponse {
+  int64 total          = 1; // roots returned by the log
+  int64 already_present = 2; // already in the local roots store
+  int64 stored         = 3; // newly written
+  string error         = 4; // set if get-roots failed (the call still returns)
+}
+
+message VerifyEntryRequest {
+  string output_root = 1; // the log's output prefix (holds partitions, issuers/, roots/)
+  int64 index = 2;        // entry to verify
+}
+
+message VerifyEntryResponse {
+  bool valid              = 1; // signature path from leaf terminates at a mirrored root
+  string leaf_subject     = 2;
+  repeated string chain_subjects = 3; // issuer chain (leaf's issuer first), by subject
+  string anchor_subject   = 4; // the log-accepted root the chain terminates at
+  bool within_validity    = 5; // every cert was time-valid at the entry's SCT timestamp
+  string reason           = 6; // why valid is false (empty when valid)
 }

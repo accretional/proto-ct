@@ -43,6 +43,7 @@ var (
 	noKeepAlive = flag.Bool("no-keepalive", false, "close each HTTP connection (no keep-alive); needed for DigiCert (rfc6962)")
 	compress    = flag.String("compress", "none", "compress written files: none | gzip")
 	dryRun      = flag.Bool("dry-run", false, "resolve-issuers: report missing issuers without fetching")
+	index       = flag.Int64("index", -1, "verify: entry index to validate")
 	userAgent   = flag.String("user-agent", "", "override User-Agent")
 	timeout     = flag.Duration("timeout", time.Hour, "overall RPC timeout")
 	covSTH      = flag.Bool("coverage-sth", true, "coverage mode: query the live STH for tree_size + coverage%%")
@@ -73,8 +74,12 @@ func main() {
 		runCoverage(ctx, cli)
 	case "resolve-issuers":
 		runResolveIssuers(ctx, cli)
+	case "mirror-roots":
+		runMirrorRoots(ctx, cli)
+	case "verify":
+		runVerify(ctx, cli)
 	default:
-		log.Fatalf("unknown -mode %q (want list|sth|fetch|coverage|resolve-issuers)", *mode)
+		log.Fatalf("unknown -mode %q (want list|sth|fetch|coverage|resolve-issuers|mirror-roots|verify)", *mode)
 	}
 }
 
@@ -266,5 +271,52 @@ func runResolveIssuers(ctx context.Context, cli pb.CTIngestionServiceClient) {
 	}
 	for _, e := range resp.GetErrors() {
 		fmt.Printf("  ! %s\n", e)
+	}
+}
+
+func runMirrorRoots(ctx context.Context, cli pb.CTIngestionServiceClient) {
+	if *out == "" {
+		log.Fatalf("mirror-roots mode needs -out (the log's output root)")
+	}
+	resp, err := cli.MirrorRoots(ctx, &pb.MirrorRootsRequest{
+		Log:        selector(),
+		OutputRoot: *out,
+		TargetQps:  *qps,
+		UserAgent:  *userAgent,
+	})
+	if err != nil {
+		log.Fatalf("MirrorRoots: %v", err)
+	}
+	fmt.Printf("accepted roots : %d\n", resp.GetTotal())
+	fmt.Printf("already present: %d\n", resp.GetAlreadyPresent())
+	fmt.Printf("stored         : %d\n", resp.GetStored())
+	if resp.GetError() != "" {
+		fmt.Printf("error          : %s\n", resp.GetError())
+	}
+}
+
+func runVerify(ctx context.Context, cli pb.CTIngestionServiceClient) {
+	if *out == "" || *index < 0 {
+		log.Fatalf("verify mode needs -out and -index >= 0")
+	}
+	resp, err := cli.VerifyEntry(ctx, &pb.VerifyEntryRequest{OutputRoot: *out, Index: *index})
+	if err != nil {
+		log.Fatalf("VerifyEntry: %v", err)
+	}
+	status := "INVALID"
+	if resp.GetValid() {
+		status = "VALID"
+	}
+	fmt.Printf("entry %d: %s\n", *index, status)
+	fmt.Printf("  leaf   : %s\n", resp.GetLeafSubject())
+	for i, c := range resp.GetChainSubjects() {
+		fmt.Printf("  chain%d : %s\n", i, c)
+	}
+	if resp.GetAnchorSubject() != "" {
+		fmt.Printf("  anchor : %s\n", resp.GetAnchorSubject())
+	}
+	fmt.Printf("  valid at SCT time: %v\n", resp.GetWithinValidity())
+	if resp.GetReason() != "" {
+		fmt.Printf("  reason : %s\n", resp.GetReason())
 	}
 }
