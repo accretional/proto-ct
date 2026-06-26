@@ -37,7 +37,7 @@ One directory tree per log (the caller owns the top-level prefix, conventionally
 
 Each record (`RawLogEntry`) is minimal and protocol-uniform: the raw `leaf_input` (TLS
 `MerkleTreeLeaf`) + `chain_fingerprints` (SHA-256 of each issuer cert, resolved through `issuers/`)
-+ precert fields. See **[docs/v2_storage_format.md](docs/v2_storage_format.md)** for the full format.
+and precert fields. See **[docs/v2_storage_format.md](docs/v2_storage_format.md)** for the full format.
 
 ### Components
 
