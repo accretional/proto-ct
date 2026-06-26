@@ -1,163 +1,154 @@
-# proto-ct — Certificate Transparency Mirror
+# proto-ct — Certificate Transparency archiver
 
-A high-throughput tool for mirroring [Certificate Transparency](https://certificate.transparency.dev/) logs to local SQLite databases, with a gRPC API for streaming ingestion and progress monitoring.
+Tools for mirroring [Certificate Transparency](https://certificate.transparency.dev/) logs to local
+storage. The repository contains two generations:
 
-## What it does
+- **proto-ct v2** (current) — a stateless, range-addressable **raw-leaf archiver**. This README
+  covers it.
+- **proto-ct v1** (legacy) — the original single-host mirror that parses certs into month-sharded
+  SQLite. Preserved in [README_v1.md](README_v1.md).
 
-Certificate Transparency logs are append-only public records of every TLS certificate issued by participating CAs. This tool mirrors those logs locally by:
+---
 
-1. Downloading binary tile data from any [static-ct-api](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md) compatible log
-2. Parsing X.509 certificates and pre-certificates from each tile
-3. Writing subject (certificate) data to SQLite databases partitioned by **cert issuance month** (`YYYY-MM/`)
-4. Maintaining a single global issuers (CA) database at the archive root
-5. Streaming parsed certificate records to connected gRPC clients in real time
-6. Tracking progress so mirroring can be interrupted and resumed at any time
+## proto-ct v2
 
-## Architecture
+### What it is
+
+v2 fetches a half-open entry range `[start, end)` from a CT log and writes the log's raw Merkle
+leaves to disk, partitioned by time and index, with deduplicated issuer and accepted-root
+certificates stored alongside. All cert/subject parsing is deferred to later tools.
+
+Each fetch is an independent unit of work — **no shared writer, no merge or flush step** — so jobs
+fan out across hosts and ranges, with an external orchestrator assigning ranges.
+
+Both CT APIs are supported and unified: **RFC 6962** (`get-entries`) and **static-ct-api** (tiles)
+produce identical on-disk output.
+
+### Storage layout
+
+One directory tree per log (the caller owns the top-level prefix, conventionally the hex log id):
+
+```
+<output_root>/
+├── <YYYY-MM-DD>/<first>-<last>.binpb[.gz]   # raw leaves (RawLogEntryBatch), partitioned by leaf day + index
+├── issuers/<sha256-hex>.der                 # each unique issuer-chain cert, once (content-addressed)
+└── roots/<sha256-hex>.der                   # the log's accepted roots (trust anchors)
+```
+
+Each record (`RawLogEntry`) is minimal and protocol-uniform: the raw `leaf_input` (TLS
+`MerkleTreeLeaf`) + `chain_fingerprints` (SHA-256 of each issuer cert, resolved through `issuers/`)
++ precert fields. See **[docs/v2_storage_format.md](docs/v2_storage_format.md)** for the full format.
+
+### Components
+
+| Path | Role |
+|---|---|
+| `cmd/ctv2-server` | gRPC server (default `:50052`, gRPC reflection enabled) |
+| `cmd/ctv2` | CLI: range jobs + maintenance/inspection (dials the server) |
+| `internal/ctv2` | implementation (fetchers, partition writer, issuer/root stores, verify) |
+| `proto/ctingestion/v2` | service definition → `gen/ctingestion/v2` |
+
+### gRPC API — `CTIngestionService`
+
+| RPC | Purpose |
+|---|---|
+| `GetLogEntries` | Fetch a range and write partitions. Resolves issuer certs and mirrors the log's roots automatically. |
+| `GetLogList` | Current CT log catalogue (default: Google's v3 `log_list.json`). |
+| `GetSTH` | The log's current signed tree head / checkpoint. |
+| `CheckCoverage` | How much of a log is on disk — derived from partition filenames, no progress DB. Optional gaps + live-STH coverage %. |
+| `ResolveIssuers` | Standalone backfill of the issuer store for a static log. |
+| `MirrorRoots` | Fetch the log's accepted roots (`get-roots`) into `roots/`. |
+| `VerifyEntry` | Validate an entry's chain fully offline: leaf + issuer store + mirrored roots. |
+
+### Quick start
+
+**Requirements:** Go 1.26. (`protoc` + `protoc-gen-go` / `protoc-gen-go-grpc` only to regenerate
+protos; the generated code is committed.)
+
+```bash
+# Build everything (v2 binaries first, then the legacy v1 ones)
+bash build.sh
+# or just the v2 binaries:
+#   go build -o bin/ctv2-server ./cmd/ctv2-server
+#   go build -o bin/ctv2        ./cmd/ctv2
+
+# Start the server
+./bin/ctv2-server -out /data/ct-v2
+
+# Discover logs / inspect a tree head
+./bin/ctv2 -mode list
+./bin/ctv2 -mode sth -log-id <hex>
+
+# Fetch a range of one log -> writes partitions + issuers/ + roots/
+./bin/ctv2 -mode fetch -log-id <hex> -start 0 -end 102400 \
+  -concurrency 64 -compress gzip -out /data/ct-v2/<hex>
+
+# Check coverage, then validate a stored entry's chain offline
+./bin/ctv2 -mode coverage -log-id <hex> -out /data/ct-v2/<hex>
+./bin/ctv2 -mode verify   -index 5000   -out /data/ct-v2/<hex>
+```
+
+### CLI modes
+
+| `-mode` | Does |
+|---|---|
+| `fetch` | Fetch `[start, end)` of a log and write it (issuers + roots resolved automatically). |
+| `list` | Print the CT log catalogue (id, protocol, operator, URL). |
+| `sth` | Print a log's current tree size / checkpoint. |
+| `coverage` | Report stored entries, contiguous range, gaps, and (with `-coverage-sth`) live coverage %. |
+| `resolve-issuers` | Backfill missing issuer certs for a static log's output root. |
+| `mirror-roots` | (Re-)mirror a log's accepted roots. |
+| `verify` | Validate the chain of entry `-index N` against the local issuer + root stores. |
+
+### Selecting a log
+
+- **By id:** `-log-id <hex>` — resolved against the cached log list (supplies URL, protocol, key).
+- **Explicitly:** `-url <base> -protocol rfc6962|static|tiles` (add `-pubkey <base64 DER SPKI>` for
+  static logs to verify the checkpoint). `tiles` is the checkpoint-free static tile front-end some
+  RFC 6962 logs expose.
+
+### Tuning
+
+Throughput knobs are exposed per request: `-concurrency`, `-qps`, `-page-size`, `-compress`,
+`-granularity`, and `-no-keepalive`. CT operators differ a lot in rate-limiting behaviour — see
+**[docs/v2_request_tuning.md](docs/v2_request_tuning.md)** for per-provider recommendations
+(e.g. DigiCert needs `-no-keepalive`, Cloudflare a low `-qps`, TrustAsia the tile front-end).
+
+### Build & test scripts
+
+| Script | Does |
+|---|---|
+| `setup.sh` | Check Go, install protoc plugins, regenerate proto stubs (v2 + v1), `go mod tidy`. |
+| `build.sh` | `setup.sh` + compile all binaries to `bin/`. |
+| `test.sh` | `build.sh` + `go test ./...`. |
+| `LET_IT_RIP.sh` | End-to-end round-trip: fetch a small live range, then check coverage and verify a chain. |
+
+---
+
+## proto-ct v1 (legacy)
+
+The original implementation: a gRPC service that downloads static-ct-api tiles, parses X.509
+certs, and writes them to SQLite partitioned by certificate issuance month, behind a single writer
+with an SSD→HDD flush. It still builds (`bash build.sh` → `bin/ct-server`, `bin/ct-client`, …) and
+its documentation is preserved verbatim in **[README_v1.md](README_v1.md)**.
+
+v2 was written to replace v1's flush-bound central-writer model with stateless, fan-out range jobs.
+
+## Repository layout
 
 ```
 proto-ct/
 ├── cmd/
-│   ├── server/          # gRPC server binary
-│   ├── client/          # CLI client (mirror + check modes)
-│   ├── export/          # Aggregate DNS SANs from archive into sharded output files
-│   └── repartition/     # One-shot migration: rekey an archive by cert issuance month
+│   ├── ctv2-server/   ctv2/        # v2: server + CLI
+│   └── server/ client/ export/ …   # v1: SQLite mirror (see README_v1.md)
 ├── internal/
-│   ├── ctlog/           # Tile downloader & binary TileLeaf parser
-│   ├── db/              # SQLite: issuers, subjects, pool, progress tracking
-│   └── ingestion/       # gRPC service implementation + metrics
-├── proto/ctingestion/v1/ # Protobuf service definition
-└── tools/
-    ├── rawscan/         # Raw SQLite page scanner (bypass cursor for fragmented DBs)
-    └── r2_backup.sh     # Sync archive DBs to Cloudflare R2
+│   ├── ctv2/                       # v2 implementation
+│   └── ctlog/ db/ ingestion/       # v1 implementation
+├── proto/ctingestion/{v1,v2}/      # protobuf service definitions
+├── gen/ctingestion/{v1,v2}/        # generated Go
+└── docs/                           # v2_storage_format.md, v2_request_tuning.md, …
 ```
 
-## Storage layout
+## License
 
-Archive partitions are keyed by **cert issuance month** (`not_before` truncated to `YYYY-MM`), not by the date the data was ingested. This makes date-range queries, incremental exports, and cert-age filtering efficient.
-
-```
-<archive_dir>/
-  issuers.db             ← global CA table (ca_id PK, fingerprint, CN, org, country)
-  progress.db            ← resumption state across sessions
-  ingestion.log          ← periodic metrics (appended every 5 min)
-  2025-09/
-    subjects.db          ← all certs with not_before in September 2025
-    subjects_export.tsv  ← export intermediate (written by ct-export, if run)
-  2025-10/
-    subjects.db          ← all certs with not_before in October 2025
-  2026-01/
-    subjects.db
-  ...
-```
-
-A single `issuers.db` at the archive root holds all CA records. `ca_id` is consistent across every monthly partition, so cross-partition joins work without remapping:
-
-```sql
-ATTACH '/archive/issuers.db' AS idb;
-SELECT s.common_name, i.common_name AS issuer, s.not_after
-FROM subjects s JOIN idb.issuers i ON s.ca_id = i.ca_id
-LIMIT 10;
-```
-
-### Active (in-progress) layout
-
-During an ingestion session, each partition is written to a fast local staging area first, then flushed to the archive drive on completion or at midnight:
-
-```
-<active_dir>/
-  20260519/              ← session date (ingestion date, not cert date)
-    2026-02/
-      subjects.db        ← certs with not_before in Feb 2026, being ingested now
-    2026-03/
-      subjects.db
-```
-
-Small batches (< 256 MiB active DB) are merged into the archive via direct `INSERT OR IGNORE`. Large bulk ingestion runs use a full rebuild to keep archive pages contiguous.
-
-## Quick start
-
-**Requirements:** Go 1.26, `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`, `sqlite3`
-
-```bash
-# Build everything
-bash build.sh
-
-# Start the server
-./bin/ct-server --port 50051
-
-# Mirror 1 million entries from Let's Encrypt's sycamore log
-./bin/ct-client \
-  --root https://mon.sycamore.ct.letsencrypt.org/2026h1/tile/data/ \
-  --batch 1000000 \
-  --qps 500 \
-  --out /fast/ssd/active/ \
-  --archive /slow/hdd/archive/
-
-# Check current progress
-./bin/ct-client --check --archive /slow/hdd/archive/
-```
-
-## Scripts and tools
-
-| Script / binary | Purpose |
-|---|---|
-| `setup.sh` | Install protoc plugins, regenerate gRPC stubs, `go mod tidy` |
-| `build.sh` | Run setup + compile binaries to `bin/` |
-| `test.sh` | Run build + `go test ./...` |
-| `LET_IT_RIP.sh` | Full round-trip test: start server, mirror 1000 entries, verify DBs |
-| `bin/ct-export` | Aggregate DNS SANs across all archive partitions into sharded output files |
-| `bin/ct-repartition` | One-shot migration: rekey an ingestion-date archive to cert-issuance-month layout |
-| `bin/rawscan` | Raw SQLite page scanner — bypass B-tree cursor on heavily fragmented DBs |
-| `tools/r2_backup.sh` | Upload archive DBs to Cloudflare R2 (resumable, manifest-tracked) |
-
-## gRPC API
-
-```protobuf
-service CTIngestionService {
-  // Stream certificate records as they are mirrored.
-  rpc IngestLog(IngestRequest) returns (stream SubjectRecord);
-  // Return current mirroring progress and storage metrics.
-  rpc Check(CheckRequest) returns (CheckResponse);
-}
-```
-
-`CheckResponse` includes the live log tree size (from the checkpoint endpoint), total entries mirrored, coverage percentage, and sizes of all local database files.
-
-## Rate limiting
-
-Pass `--qps N` to cap HTTP requests to the monitoring endpoint. The actual rate is throttled to **80% of the target** via a token bucket. All requests — tile downloads and issuer cert fetches — share the same limiter.
-
-At 500 QPS (400 effective): ~900,000 entries/hour (400 tiles/sec × 256 entries/tile peak).
-
-## Resumption
-
-Progress is tracked in `<archive_dir>/progress.db` keyed by monitoring root URL. Restarting the client with the same `--archive` and `--root` automatically continues from the last completed tile.
-
-## Querying the archive
-
-Each monthly partition is a standalone SQLite database. Attach `issuers.db` from the archive root for issuer lookups:
-
-```sql
--- Query a single month's certs with issuer info
-sqlite3 /archive/2026-01/subjects.db
-ATTACH '/archive/issuers.db' AS idb;
-SELECT s.common_name, i.common_name AS issuer, s.not_after
-FROM subjects s JOIN idb.issuers i ON s.ca_id = i.ca_id
-LIMIT 10;
-
--- Count certs by issuer across all of Q1 2026 (attach multiple partitions)
-ATTACH '/archive/2026-02/subjects.db' AS feb;
-ATTACH '/archive/2026-03/subjects.db' AS mar;
-SELECT i.common_name, count(*) AS n
-FROM (
-  SELECT ca_id FROM subjects
-  UNION ALL SELECT ca_id FROM feb.subjects
-  UNION ALL SELECT ca_id FROM mar.subjects
-) c JOIN idb.issuers i ON c.ca_id = i.ca_id
-GROUP BY i.common_name ORDER BY n DESC LIMIT 10;
-```
-
-## Data source
-
-Tested against [Let's Encrypt's sycamore log](https://letsencrypt.org/docs/ct-logs/) (`https://mon.sycamore.ct.letsencrypt.org/2026h1/tile/data/`), which implements the [C2SP static-ct-api](https://github.com/C2SP/C2SP/blob/main/static-ct-api.md) spec. Any compliant static-ct-api log is supported.
+MIT — see [LICENSE](LICENSE).

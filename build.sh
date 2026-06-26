@@ -10,6 +10,14 @@ bash setup.sh
 echo "Building binaries..."
 mkdir -p bin
 
+# ── proto-ct v2 (current): raw-leaf archiver ─────────────────────────────────
+go build -o bin/ctv2-server ./cmd/ctv2-server
+echo "✓ bin/ctv2-server"
+
+go build -o bin/ctv2 ./cmd/ctv2
+echo "✓ bin/ctv2"
+
+# ── proto-ct v1 (legacy): SQLite mirror — see README_v1.md ────────────────────
 go build -o bin/ct-server ./cmd/server
 echo "✓ bin/ct-server"
 

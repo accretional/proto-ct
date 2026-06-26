@@ -24,31 +24,39 @@ fi
 echo "✓ protoc plugins"
 
 # ── generate proto code ──────────────────────────────────────────────────────
-PROTO_OUT_DIR="gen/ctingestion/v1"
-mkdir -p "$PROTO_OUT_DIR"
-
-PROTO_SRC="proto/ctingestion/v1/ingestion.proto"
-GEN_FILES=("${PROTO_OUT_DIR}/ingestion.pb.go" "${PROTO_OUT_DIR}/ingestion_grpc.pb.go")
-NEED_GEN=false
-for f in "${GEN_FILES[@]}"; do
-  if [ ! -f "$f" ] || [ "$PROTO_SRC" -nt "$f" ]; then
-    NEED_GEN=true; break
+# Regenerate a proto group only when a source is newer than its generated code.
+# $1 = a representative generated file to stat against; $2.. = proto sources.
+gen_proto() {
+  local marker="$1"; shift
+  local need=false src
+  [ -f "$marker" ] || need=true
+  for src in "$@"; do
+    [ "$src" -nt "$marker" ] && need=true
+  done
+  if $need; then
+    echo "Generating ${*}..."
+    protoc \
+      --proto_path=proto \
+      --go_out=gen \
+      --go_opt=paths=source_relative \
+      --go-grpc_out=gen \
+      --go-grpc_opt=paths=source_relative \
+      "$@"
   fi
-done
+}
 
-if $NEED_GEN; then
-  echo "Generating gRPC code from proto..."
-  protoc \
-    --proto_path=proto \
-    --go_out=gen \
-    --go_opt=paths=source_relative \
-    --go-grpc_out=gen \
-    --go-grpc_opt=paths=source_relative \
-    "$PROTO_SRC"
-  echo "✓ Proto generated"
-else
-  echo "✓ Proto up-to-date"
-fi
+mkdir -p gen/ctingestion/v2 gen/ctingestion/v1
+
+# v2 (current): the raw-leaf archiver service.
+gen_proto gen/ctingestion/v2/ingestion.pb.go \
+  proto/ctingestion/v2/ingestion.proto \
+  proto/ctingestion/v2/log_list.proto
+
+# v1 (legacy): the SQLite mirror service.
+gen_proto gen/ctingestion/v1/ingestion.pb.go \
+  proto/ctingestion/v1/ingestion.proto
+
+echo "✓ Proto up-to-date"
 
 # ── go mod tidy ──────────────────────────────────────────────────────────────
 if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then
