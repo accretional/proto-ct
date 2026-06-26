@@ -4,115 +4,82 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-# Run tests first (idempotent)
+# Run tests first (idempotent): builds the v2 binaries + runs the unit tests.
 bash test.sh
 
 # ── round-trip parameters ────────────────────────────────────────────────────
-BATCH_SIZE=1000
-MONITORING_ROOT="https://mon.sycamore.ct.letsencrypt.org/2026h1/tile/data/"
-TARGET_QPS=20      # actual = 80% = 16 QPS
-SERVER_PORT=50051
+END=2048           # 256-aligned -> the static frontier covers the whole range
+CONCURRENCY=16
+SERVER_PORT=50060  # off the default :50052 to avoid colliding with a running server
 
-# Use the external drive; fall back only if the volume is not mounted at all.
 if [ -d "/Volumes/wd_office_2" ]; then
-  OUTPUT_DIR="/Volumes/wd_office_2/datasets/CT/"
-  mkdir -p "$OUTPUT_DIR"
+  OUTPUT_BASE="/Volumes/wd_office_2/ct-v2/_smoke"
 else
-  echo "Note: /Volumes/wd_office_2 not mounted, using /tmp/ct-data/"
-  OUTPUT_DIR="/tmp/ct-data/"
+  echo "Note: /Volumes/wd_office_2 not mounted, using /tmp/ct-v2-smoke/"
+  OUTPUT_BASE="/tmp/ct-v2-smoke"
 fi
+mkdir -p "$OUTPUT_BASE"
 
-RUN_DATE=$(date -u +%Y%m%d)
-RUN_DIR="${OUTPUT_DIR}${RUN_DATE}"
-
-mkdir -p "$RUN_DIR"
-# Clean previous run's DBs (but keep progress.db for resumption testing)
-rm -f "${RUN_DIR}/issuers.db" "${RUN_DIR}/subjects.db"
-
-echo ""
-echo "═══════════════════════════════════════════════════════════"
-echo " CT Log Ingestion Round-trip"
-echo " batch=$BATCH_SIZE  qps=$TARGET_QPS  out=$OUTPUT_DIR"
-echo " root=$MONITORING_ROOT"
-echo " run_dir=$RUN_DIR"
-echo "═══════════════════════════════════════════════════════════"
-echo ""
-
-# Start server in background
-bin/ct-server --port "$SERVER_PORT" &
+# Start the server in the background.
+bin/ctv2-server -port "$SERVER_PORT" -out "$OUTPUT_BASE" &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 sleep 1
+ADDR="localhost:${SERVER_PORT}"
 
-echo "Server PID: $SERVER_PID"
-
-# Run client
-bin/ct-client \
-  --addr "localhost:${SERVER_PORT}" \
-  --root "$MONITORING_ROOT" \
-  --batch "$BATCH_SIZE" \
-  --qps "$TARGET_QPS" \
-  --out "$OUTPUT_DIR"
-
-echo ""
-echo "═══════════════════════════════════════════════════════════"
-echo " Verification"
-echo "═══════════════════════════════════════════════════════════"
-
-ISSUER_COUNT=$(sqlite3 "${RUN_DIR}/issuers.db" "SELECT COUNT(*) FROM issuers;" 2>/dev/null || echo "N/A")
-SUBJECT_COUNT=$(sqlite3 "${RUN_DIR}/subjects.db" "SELECT COUNT(*) FROM subjects;" 2>/dev/null || echo "N/A")
-PROGRESS_RUNS=$(sqlite3 "${OUTPUT_DIR}progress.db" "SELECT COUNT(*) FROM runs;" 2>/dev/null || echo "N/A")
-CERT_LOG_COUNT=$(sqlite3 "${OUTPUT_DIR}progress.db" "SELECT COUNT(*) FROM cert_log;" 2>/dev/null || echo "N/A")
-
-echo "Issuers:       $ISSUER_COUNT rows  (${RUN_DIR}/issuers.db)"
-echo "Subjects:      $SUBJECT_COUNT rows  (${RUN_DIR}/subjects.db)"
-echo "Progress runs: $PROGRESS_RUNS       (${OUTPUT_DIR}progress.db)"
-echo "Cert log:      $CERT_LOG_COUNT rows"
-
-if [ "$SUBJECT_COUNT" = "$BATCH_SIZE" ]; then
-  echo "✓ Subject count matches batch size ($BATCH_SIZE)"
-else
-  echo "✗ Subject count $SUBJECT_COUNT ≠ expected $BATCH_SIZE"
+# Pick a usable static log from the live list at runtime (log shards rotate, so
+# don't hardcode an id). Prefer a large operator; fall back to any static log.
+LOG_ID=$(bin/ctv2 -addr "$ADDR" -mode list 2>/dev/null | awk '$2=="static" && /Encrypt/ {print $1; exit}')
+[ -z "$LOG_ID" ] && LOG_ID=$(bin/ctv2 -addr "$ADDR" -mode list 2>/dev/null | awk '$2=="static" {print $1; exit}')
+if [ -z "$LOG_ID" ]; then
+  echo "✗ no static log found in the log list"; exit 1
 fi
 
-echo ""
-echo "Sample issuers:"
-sqlite3 "${RUN_DIR}/issuers.db" \
-  "SELECT ca_id, common_name, organization, country FROM issuers LIMIT 5;" \
-  2>/dev/null | column -t -s '|'
-
-echo ""
-echo "Sample subjects:"
-sqlite3 "${RUN_DIR}/subjects.db" \
-  "SELECT id, ca_id, common_name, not_after FROM subjects LIMIT 5;" \
-  2>/dev/null | column -t -s '|'
-
-echo ""
-echo "CA join check:"
-sqlite3 "${RUN_DIR}/subjects.db" \
-  "ATTACH '${RUN_DIR}/issuers.db' AS idb;
-   SELECT s.id, s.common_name, i.common_name AS issuer, i.country
-   FROM subjects s
-   JOIN idb.issuers i ON s.ca_id = i.ca_id
-   LIMIT 5;" 2>/dev/null | column -t -s '|'
-
-echo ""
-echo "Progress / resumption state:"
-sqlite3 "${OUTPUT_DIR}progress.db" \
-  "SELECT monitoring_root, next_tile_idx, total_processed, updated_at FROM runs;" \
-  2>/dev/null | column -t -s '|'
-
-echo ""
-echo "Recent cert_log entries:"
-sqlite3 "${OUTPUT_DIR}progress.db" \
-  "SELECT tile_idx, entry_idx, not_after, ct_log_uri FROM cert_log LIMIT 5;" \
-  2>/dev/null | column -t -s '|'
+OUT="${OUTPUT_BASE}/${LOG_ID}"
+rm -rf "$OUT"        # partitions are immutable: start each round-trip clean
+mkdir -p "$OUT"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
-echo " Top 10 Parent Domains"
+echo " proto-ct v2 round-trip"
+echo " log_id=${LOG_ID:0:16}…  range=[0,$END)  concurrency=$CONCURRENCY"
+echo " server PID=$SERVER_PID  out=$OUT"
 echo "═══════════════════════════════════════════════════════════"
-bash tools/top_domains.sh 10 "$OUTPUT_DIR"
+
+# ── fetch the range (writes partitions + issuers/ + roots/) ──────────────────
+echo ""
+echo "── fetch ──"
+bin/ctv2 -addr "$ADDR" -mode fetch -log-id "$LOG_ID" \
+  -start 0 -end "$END" -concurrency "$CONCURRENCY" -compress gzip -out "$OUT"
+
+# ── coverage ─────────────────────────────────────────────────────────────────
+echo ""
+echo "── coverage ──"
+bin/ctv2 -addr "$ADDR" -mode coverage -log-id "$LOG_ID" -out "$OUT"
+
+# ── verify a couple of stored entries against the mirrored roots ─────────────
+echo ""
+echo "── verify ──"
+for i in 0 1024; do
+  bin/ctv2 -addr "$ADDR" -mode verify -out "$OUT" -index "$i"
+  echo ""
+done
+
+# ── layout + assertions ──────────────────────────────────────────────────────
+echo "── layout ──"
+PARTS=$(find "$OUT" -name '*.binpb.gz' | wc -l | tr -d ' ')
+ISSUERS=$(find "$OUT/issuers" -name '*.der' 2>/dev/null | wc -l | tr -d ' ')
+ROOTS=$(find "$OUT/roots" -name '*.der' 2>/dev/null | wc -l | tr -d ' ')
+echo "partitions: $PARTS   issuers: $ISSUERS   roots: $ROOTS"
+echo "size: $(du -sh "$OUT" | cut -f1)"
+
+echo ""
+STORED=$(bin/ctv2 -addr "$ADDR" -mode coverage -log-id "$LOG_ID" -out "$OUT" 2>/dev/null \
+  | awk '/stored entries/{print $4}')
+[ "$STORED" = "$END" ] && echo "✓ stored entries match the requested range ($END)" \
+                       || { echo "✗ stored entries $STORED ≠ expected $END"; exit 1; }
+[ "$ISSUERS" -gt 0 ] && echo "✓ issuer store populated"  || { echo "✗ issuer store empty"; exit 1; }
+[ "$ROOTS"   -gt 0 ] && echo "✓ accepted roots mirrored" || { echo "✗ roots store empty"; exit 1; }
 
 echo ""
 echo "Round-trip complete."
