@@ -60,6 +60,96 @@ and precert fields. See **[docs/v2_storage_format.md](docs/v2_storage_format.md)
 | `MirrorRoots` | Fetch the log's accepted roots (`get-roots`) into `roots/`. |
 | `VerifyEntry` | Validate an entry's chain fully offline: leaf + issuer store + mirrored roots. |
 
+### Remote gRPC clients (no CLI)
+
+The server exposes the full API over gRPC with **reflection enabled**, so any gRPC client can drive
+it without the `ctv2` CLI or the `.proto` files. The walkthrough below uses
+[`grpcurl`](https://github.com/fullstorydev/grpcurl); a Go/Python/… client using reflection or the
+generated stubs makes the same calls.
+
+Conventions: requests are proto3 JSON (field names are **lowerCamelCase**); `bytes` fields
+(`logId`, `publicKey`) are **base64**. `outputRoot` is a path on the **server's** filesystem — the
+server reads and writes the archive, not the client. The server listens on `:50052` plaintext.
+
+```bash
+HOST=server.example:50052
+SVC=ctingestion.v2.CTIngestionService
+```
+
+**1. Discover the service (reflection).**
+
+```bash
+grpcurl -plaintext $HOST list                 # services
+grpcurl -plaintext $HOST list $SVC            # RPCs
+grpcurl -plaintext $HOST describe $SVC.GetLogEntriesRequest   # message schema
+```
+
+**2. Fetch the log list** (`GetLogList`) and **3. select a log by id**. Each log carries a base64
+`logId`, a `protocol`, and its URLs; pick one and reuse its `logId` everywhere below:
+
+```bash
+grpcurl -plaintext -d '{}' $HOST $SVC/GetLogList \
+  | jq -r '.operators[].logs[]
+           | select(.protocol=="LOG_PROTOCOL_STATIC_CT_API")
+           | "\(.logId)\t\(.description // .monitoringUrl)"'
+# -> AnVk7P...=    Let's Encrypt 'Sycamore2026h2'
+ID='AnVk7P...='    # the base64 logId you picked
+```
+
+(Or skip the list and select explicitly: `"log":{"monitoringUrl":"<base>","protocol":"LOG_PROTOCOL_RFC6962"}`,
+adding `"publicKey":"<base64 DER SPKI>"` for static logs.)
+
+**4. Current tree size (`GetSTH`) and local status (`CheckCoverage`).**
+
+```bash
+grpcurl -plaintext -d '{"log":{"logId":"'$ID'"}}' $HOST $SVC/GetSTH
+# -> { "treeSize": "306003337", "timestamp": "...", ... }
+
+grpcurl -plaintext -d '{"log":{"logId":"'$ID'"},"outputRoot":"/data/ct-v2/mylog",
+  "querySth":true,"includeGaps":true}' $HOST $SVC/CheckCoverage
+# -> { "treeSize", "storedEntries", "contiguousThrough", "coveragePct", "gaps":[{"start","end"}] }
+```
+
+`CheckCoverage` is derived from the files on disk (no progress DB); use its `gaps` to plan or resume.
+
+**5. Ingestion — range requests (`GetLogEntries`).** One call fetches `[startIndex, endIndex)`,
+writes the partitions, and auto-resolves issuers + mirrors roots. It is a self-contained unit of
+work, so an orchestrator splits a log into ranges and issues them independently (and across hosts):
+
+```bash
+grpcurl -plaintext -d '{
+  "log": {"logId":"'$ID'"},
+  "startIndex": 0, "endIndex": 1048576,
+  "fetchConcurrency": 32, "pageSize": 256,
+  "compression": "COMPRESSION_GZIP",
+  "outputRoot": "/data/ct-v2/mylog"
+}' $HOST $SVC/GetLogEntries
+# -> { "entriesWritten", "bytesWritten", "firstIndex", "lastIndex" }
+```
+
+Patterns:
+- **Chunk** `[0, treeSize)` into fixed ranges (e.g. 1,048,576). Keep boundaries **256-aligned** for
+  static logs and DigiCert/Sectigo.
+- **Tune per provider** with `fetchConcurrency`, `targetQps`, `disableKeepAlive` (see the tuning doc).
+- **Resume** by re-issuing `GetLogEntries` for the `gaps` from `CheckCoverage`. Partitions are
+  immutable — re-fetching an already-written range into the same `outputRoot` errors, so fetch only
+  the missing ranges (or use a fresh `outputRoot`).
+
+**6. Chain verification.** `GetLogEntries` already populates `issuers/` and `roots/`; to refresh or
+backfill them explicitly, then validate an entry's chain fully offline:
+
+```bash
+grpcurl -plaintext -d '{"log":{"logId":"'$ID'"},"outputRoot":"/data/ct-v2/mylog"}' $HOST $SVC/MirrorRoots
+grpcurl -plaintext -d '{"log":{"logId":"'$ID'"},"outputRoot":"/data/ct-v2/mylog"}' $HOST $SVC/ResolveIssuers
+
+grpcurl -plaintext -d '{"outputRoot":"/data/ct-v2/mylog","index":1024}' $HOST $SVC/VerifyEntry
+# -> { "valid":true, "leafSubject", "chainSubjects":[...], "anchorSubject", "withinValidity" }
+```
+
+`VerifyEntry` rebuilds the chain from the leaf + the local `issuers/` store and checks the signature
+path terminates at a mirrored accepted root in `roots/`. `MirrorRoots`/`ResolveIssuers` are only
+needed for an explicit refresh or to backfill data ingested elsewhere.
+
 ### Quick start
 
 **Requirements:** Go 1.26. (`protoc` + `protoc-gen-go` / `protoc-gen-go-grpc` only to regenerate
