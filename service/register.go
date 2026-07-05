@@ -9,6 +9,7 @@ import (
 
 	pb "github.com/accretional/proto-ct/gen/ctingestion/v2"
 	"github.com/accretional/proto-ct/internal/ctv2"
+	cx509 "github.com/google/certificate-transparency-go/x509"
 )
 
 // Register registers the CTIngestionService (v2) on s, backed by a fresh
@@ -22,4 +23,10 @@ func Register(s *grpc.Server) {
 // dNSNames. See ctv2.EntryWithSubjects.
 func EntryWithSubjects(root string, index int64) (*pb.RawLogEntry, string, []string, error) {
 	return ctv2.EntryWithSubjects(root, index)
+}
+
+// EntryWithCert returns the archived RawLogEntry at index and its fully parsed
+// leaf certificate. See ctv2.EntryWithCert.
+func EntryWithCert(root string, index int64) (*pb.RawLogEntry, *cx509.Certificate, error) {
+	return ctv2.EntryWithCert(root, index)
 }
