@@ -12,8 +12,11 @@
 *.test
 
 # Code coverage profiles and other test artifacts
+# NOTE: do NOT use a broad `coverage.*` here — it silently ignores source files
+# like internal/ctv2/coverage.go. List the actual report artifacts instead.
 *.out
-coverage.*
+coverage.html
+coverage.txt
 *.coverprofile
 profile.cov
 
